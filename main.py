@@ -89,7 +89,7 @@ def get_news(keywords):
     logger.info(f"Thu được {len(articles)} bài viết.")
     return articles
 
-# ========== 5️⃣ PHÂN TÍCH GEMINI (cập nhật theo định hướng) ==========
+# ========== 5️⃣ PHÂN TÍCH GEMINI (theo định hướng) ==========
 def summarize_with_gemini(api_key, articles):
     if not articles:
         return "Không có bài viết mới để phân tích. Kiểm tra API key NewsAPI hoặc rate limit."
@@ -210,6 +210,11 @@ def run_keepalive_server():
     logger.info(f"🌐 KeepAlive server running on port {PORT}")
     server.serve_forever()
 
-# Chạy server và scheduler
-threading.Thread(target=schedule_runner, daemon=True).start()
-threading.Thread(target=run_keepalive_server, daemon=True).start()
+# ========== 🔋 CHẠY ỨNG DỤNG ==========
+if __name__ == "__main__":
+    # Khởi động scheduler trên thread riêng
+    scheduler_thread = threading.Thread(target=schedule_runner, daemon=True)
+    scheduler_thread.start()
+
+    # Chạy server chính để giữ instance sống
+    run_keepalive_server()
