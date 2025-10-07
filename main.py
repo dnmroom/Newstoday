@@ -1,6 +1,6 @@
 # ====================================================
 # 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM
-# Gemini 2.5 Flash, song ngữ Việt-Anh, PDF Unicode (DejaVuSans), gửi Gmail tự động
+# Gemini 2.5 Flash, keyword tiếng Anh, PDF Unicode (DejaVuSans), gửi Gmail tự động
 # Sử dụng NewsAPI.org với key f9828f522b274b2aaa987ac15751bc47
 # ====================================================
 
@@ -37,7 +37,7 @@ PORT = int(os.getenv("PORT", 10000))
 
 # ========== 2️⃣ FONT (DejaVuSans với fallback NotoSans) ==========
 FONT_PATH_NOTO = "/tmp/NotoSans-Regular.ttf"
-FONT_NAME = "DejaVuSans"  # Fallback mặc định
+FONT_NAME = "DejaVuSans"  # Giả định DejaVuSans có sẵn trên Render
 try:
     if not os.path.exists(FONT_PATH_NOTO):
         logger.info("⏳ Tải font NotoSans...")
@@ -49,54 +49,47 @@ try:
     FONT_NAME = "NotoSans"
     logger.info("✅ Font NotoSans OK!")
 except Exception as e:
-    logger.warning(f"❌ NotoSans fail: {e}. Dùng DejaVuSans.")
-    !apt-get update -y -qq && apt-get install -y -qq fonts-dejavu
-    pdfmetrics.registerFont(TTFont("DejaVuSans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))
+    logger.warning(f"❌ NotoSans fail: {e}. Dùng DejaVuSans (giả định có sẵn).")
 
-# ========== 3️⃣ TỪ KHÓA (32 keywords gốc) ==========
+# ========== 3️⃣ TỪ KHÓA (chỉ tiếng Anh, 15 keywords để an toàn limit) ==========
 KEYWORDS = [
-    "kinh tế thế giới", "kinh tế Việt Nam", "thị trường chứng khoán", "bất động sản",
-    "giá vàng", "giá bạc", "thị trường dầu mỏ", "chính sách tiền tệ", "lãi suất ngân hàng",
-    "tỷ giá USD", "lạm phát", "FDI Việt Nam", "xuất khẩu", "sản xuất công nghiệp",
-    "thị trường lao động", "AI và kinh tế", "doanh nghiệp công nghệ",
-    "global economy", "Vietnam economy", "stock market", "real estate",
-    "gold price", "silver market", "oil price", "monetary policy",
-    "interest rate", "US dollar", "inflation", "cryptocurrency",
-    "Bitcoin", "Ethereum", "AI and business", "FDI in Vietnam"
-]
+    "global economy", "stock market", "real estate", "gold price",
+    "silver market", "oil price", "monetary policy", "interest rate",
+    "US dollar", "inflation", "cryptocurrency", "Bitcoin", "Ethereum",
+    "AI and business", "FDI in Vietnam"
+]  # 15 keywords, ~15 requests/lần, an toàn 100/day
 
 # ========== 4️⃣ LẤY TIN TỪ NEWSAPI ==========
 def get_news(keywords):
     articles = []
     logger.info("🔄 Đang lấy tin từ NewsAPI...")
     for kw in keywords:
-        for lang in ["vi", "en"]:
-            url = f"https://newsapi.org/v2/everything?q={kw}&language={lang}&pageSize=2&apiKey={NEWSAPI_KEY}"
-            try:
-                res = requests.get(url, timeout=10)
-                if res.status_code == 200:
-                    for a in res.json().get("articles", []):
-                        if a.get("title") and a.get("url"):
-                            articles.append({
-                                "title": a["title"],
-                                "url": a["url"],
-                                "source": a.get("source", {}).get("name", "Unknown"),
-                                "published": a.get("publishedAt"),
-                                "keyword": kw
-                            })
-                elif res.status_code == 429:
-                    logger.warning(f"⚠️ Rate limit với từ khóa '{kw}' (ngôn ngữ: {lang}). Bỏ qua.")
-                    time.sleep(60)  # Chờ 1 phút nếu rate limit
-                else:
-                    logger.warning(f"⚠️ Lỗi NewsAPI ({res.status_code}) với từ khóa '{kw}' (ngôn ngữ: {lang}): {res.json().get('message', 'Không rõ')}")
-                time.sleep(3)  # Delay 3 giây để tránh rate limit
-            except Exception as e:
-                logger.error(f"❌ Lỗi NewsAPI: {e}")
-                time.sleep(3)
+        url = f"https://newsapi.org/v2/everything?q={kw}&language=en&pageSize=2&apiKey={NEWSAPI_KEY}"
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                for a in res.json().get("articles", []):
+                    if a.get("title") and a.get("url"):
+                        articles.append({
+                            "title": a["title"],
+                            "url": a["url"],
+                            "source": a.get("source", {}).get("name", "Unknown"),
+                            "published": a.get("publishedAt"),
+                            "keyword": kw
+                        })
+            elif res.status_code == 429:
+                logger.warning(f"⚠️ Rate limit với từ khóa '{kw}'. Bỏ qua.")
+                time.sleep(60)  # Chờ 1 phút nếu rate limit
+            else:
+                logger.warning(f"⚠️ Lỗi NewsAPI ({res.status_code}) với từ khóa '{kw}': {res.json().get('message', 'Không rõ')}")
+            time.sleep(3)  # Delay 3 giây để tránh rate limit
+        except Exception as e:
+            logger.error(f"❌ Lỗi NewsAPI: {e}")
+            time.sleep(3)
     logger.info(f"Thu được {len(articles)} bài viết.")
     return articles
 
-# ========== 5️⃣ PHÂN TÍCH GEMINI ==========
+# ========== 5️⃣ PHÂN TÍCH GEMINI (cập nhật theo định hướng) ==========
 def summarize_with_gemini(api_key, articles):
     if not articles:
         return "Không có bài viết mới để phân tích. Kiểm tra API key NewsAPI hoặc rate limit."
@@ -104,8 +97,15 @@ def summarize_with_gemini(api_key, articles):
     model = genai.GenerativeModel("gemini-2.5-flash")
     titles = "\n".join([f"- {a['title']} ({a['source']})" for a in articles[:15]])
     prompt = f"""
-    Chuyên gia kinh tế: Tóm tắt xu hướng, tác động VN, cơ hội/rủi ro đầu tư bằng tiếng Việt.
-    TIN: {titles}
+    Bạn là chuyên gia phân tích kinh tế toàn cầu.
+    Hãy đọc danh sách tin tức sau và:
+    1. Tóm tắt xu hướng kinh tế - tài chính nổi bật.
+    2. Phân tích tác động đến Việt Nam (FDI, tỷ giá, đầu tư, xuất khẩu...).
+    3. Nhận định cơ hội và rủi ro đầu tư (vàng, bạc, chứng khoán, crypto, BĐS).
+    4. Trình bày bằng tiếng Việt, rõ ràng, súc tích và chuyên nghiệp.
+
+    DANH SÁCH TIN:
+    {titles}
     """
     try:
         response = model.generate_content(prompt)
@@ -179,11 +179,11 @@ def run_report():
         logger.error(f"❌ Lỗi tổng thể: {e}")
 
 # ========== 9️⃣ LỊCH TRÌNH (8h00 sáng và 23h00 tối UTC+7) ==========
-schedule.every().day.at("08:00").do(run_report)  # 8h00 sáng
-schedule.every().day.at("23:00").do(run_report)  # 23h00 tối
+schedule.every().day.at("01:00").do(run_report)  # 8h00 sáng (UTC+7 = UTC 01:00)
+schedule.every().day.at("16:00").do(run_report)  # 23h00 tối (UTC+7 = UTC 16:00)
 
 def schedule_runner():
-    logger.info("🚀 Hệ thống khởi động, chờ đến 08:00 hoặc 23:00...")
+    logger.info("🚀 Hệ thống khởi động, chờ đến 01:00 hoặc 16:00 UTC...")
     while True:
         schedule.run_pending()
         time.sleep(60)
