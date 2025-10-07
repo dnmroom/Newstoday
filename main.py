@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ========== 1️⃣ CẤU HÌNH ==========
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "f9828f522b274b2aaa987ac15751bc47")  # NewsAPI key
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "f9828f522b274b2aaa987ac15751bc47")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDjcqpFXkay_WiK9HLCChX5L0022u3Xw-s")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "manhetc@gmail.com")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "blptzqhzdzvfweiv")
@@ -47,15 +47,13 @@ try:
 except:
     FONT_NAME = "Helvetica"
 
-# ========== 3️⃣ TỪ KHÓA (chỉ tiếng Anh, chọn lọc 15 keywords) ==========
+# ========== 3️⃣ TỪ KHÓA (chỉ tiếng Anh, chọn lọc 8 keywords để an toàn limit) ==========
 KEYWORDS = [
-    "global economy", "Vietnam economy", "stock market", "real estate",
-    "gold price", "silver market", "oil price", "monetary policy",
-    "interest rate", "US dollar", "inflation", "cryptocurrency",
-    "Bitcoin", "FED", "AI and business"
-]  # 15 keywords tiếng Anh, <30 requests/lần, an toàn limit 100/day
+    "global economy", "stock market", "real estate", "gold price",
+    "monetary policy", "inflation", "cryptocurrency", "Bitcoin"
+]  # 8 keywords, ~8 requests/lần, an toàn 100/day
 
-# ========== 4️⃣ LẤY TIN TỪ NEWSAPI ==========
+# ========== 4️⃣ LẤY TIN (tăng delay, skip nếu 429) ==========
 def get_news(api_key, keywords):
     articles = []
     for kw in keywords:
@@ -74,17 +72,17 @@ def get_news(api_key, keywords):
                         })
             elif res.status_code == 429:
                 logger.warning(f"Rate limit {kw}. Skip.")
-                time.sleep(60)  # Chờ 1 phút nếu rate limit
+                continue  # Skip thay vì retry để tránh loop
             else:
                 logger.warning(f"Lỗi {res.status_code} {kw}")
-            time.sleep(3)  # Delay 3 giây để tránh rate limit
+            time.sleep(5)  # Delay 5 giây để tránh rate limit
         except Exception as e:
             logger.error(f"NewsAPI error: {e}")
-            time.sleep(3)
+            time.sleep(5)
     logger.info(f"Thu được {len(articles)} bài viết.")
     return articles
 
-# ========== 5️⃣ GEMINI (phân tích tiếng Việt) ==========
+# ========== 5️⃣ GEMINI (giữ nguyên prompt) ==========
 def summarize_with_gemini(api_key, articles):
     if not articles:
         return "Không có bài viết mới để phân tích."
@@ -111,85 +109,4 @@ def summarize_with_gemini(api_key, articles):
 
 # ========== 6️⃣ PDF ==========
 def create_pdf(summary_text, articles):
-    filename = f"Bao_cao_Kinh_te_{datetime.date.today()}.pdf"
-    doc = SimpleDocTemplate(filename, pagesize=A4)
-    styles = getSampleStyleSheet()
-    styleVN = ParagraphStyle('VN', parent=styles['Normal'], fontName=FONT_NAME, fontSize=11)
-    titleStyle = ParagraphStyle('TitleVN', parent=styles['Title'], fontName=FONT_NAME, fontSize=16, alignment=1)
-
-    story = []
-    story.append(Paragraph("BÁO CÁO PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU & VIỆT NAM", titleStyle))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(f"Ngày: {datetime.date.today()}", styleVN))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph("<b>I. PHÂN TÍCH & TÓM TẮT (Gemini 2.5 Flash):</b>", styleVN))
-    story.append(Paragraph(summary_text.replace("\n", "<br/>"), styleVN))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph("<b>II. DANH SÁCH TIN THAM KHẢO:</b>", styleVN))
-    for a in articles:
-        story.append(Paragraph(f"- <a href='{a['url']}'>{a['title']}</a> ({a['source']})", styleVN))
-        story.append(Spacer(1, 6))
-    doc.build(story)
-    return filename
-
-# ========== 7️⃣ EMAIL ==========
-def send_email(subject, body, attachment_path):
-    try:
-        msg = MIMEMultipart()
-        msg["From"] = EMAIL_SENDER
-        msg["To"] = EMAIL_RECEIVER
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain", _charset="utf-8"))
-        with open(attachment_path, "rb") as f:
-            part = MIMEApplication(f.read(), _subtype="pdf")
-            part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(attachment_path)}")
-            msg.attach(part)
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.send_message(msg)
-        logger.info("✅ Email OK!")
-    except Exception as e:
-        logger.error(f"Email fail: {e}. PDF lưu local: {attachment_path}")
-
-# ========== 8️⃣ RUN REPORT ==========
-def run_report():
-    logger.info(f"Bắt đầu báo cáo: {datetime.datetime.now()}")
-    articles = get_news(NEWS_API_KEY, KEYWORDS)
-    logger.info(f"Thu {len(articles)} bài.")
-    summary = summarize_with_gemini(GEMINI_API_KEY, articles)
-    pdf_file = create_pdf(summary, articles)
-    send_email("[BÁO CÁO KINH TẾ TOÀN CẦU & VIỆT NAM]", "Báo cáo AI đính kèm.", pdf_file)
-    logger.info("Hoàn tất!")
-
-run_report()  # Test ngay
-
-schedule.every().day.at("06:55").do(run_report)
-schedule.every().day.at("14:15").do(run_report)
-schedule.every().day.at("19:55").do(run_report)
-
-def schedule_runner():
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
-threading.Thread(target=schedule_runner, daemon=True).start()
-
-# ========== 9️⃣ SERVER ==========
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/report":
-            run_report()
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Report sent!")
-        elif self.path == "/health":
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        else:
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Running. /report to trigger.")
-
-server = HTTPServer(("0.0.0.0", PORT), Handler)
-logger.info(f"Server on {PORT}")
-server.serve_forever()
+    filename = f"Bao_cao_Kinh_te
