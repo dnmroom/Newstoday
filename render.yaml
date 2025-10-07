@@ -1,6 +1,6 @@
 services:
-  - type: worker
-    name: economic-auto-report
+  - type: web
+    name: newstoday
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
