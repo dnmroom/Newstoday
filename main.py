@@ -1,7 +1,6 @@
 # ====================================================
-# 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM
-# Gemini 2.5 Flash, song ngữ Việt-Anh, PDF Unicode (NotoSans), gửi Gmail tự động
-# Render Free Plan - có KeepAlive HTTP server để tránh timeout
+# 🤖 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM
+# Gemini 2.5 Flash | PDF Unicode | Gửi Gmail tự động | Render Free Plan (KeepAlive HTTP)
 # ====================================================
 
 import os
@@ -11,6 +10,7 @@ import smtplib
 import time
 import schedule
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -20,7 +20,6 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import google.generativeai as genai
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ========== 1️⃣ CẤU HÌNH BIẾN MÔI TRƯỜNG ==========
 GNEWS_API_KEY = os.getenv("GNEWS_API_KEY", "5774cbc463efb34d8641d9896f93ab3b")
@@ -29,11 +28,20 @@ EMAIL_SENDER = os.getenv("EMAIL_SENDER", "manhetc@gmail.com")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "blptzqhzdzvfweiv")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "manhetc@gmail.com")
 
-# ========== 2️⃣ FONT ==========
-FONT_PATH = "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"
+# ========== 2️⃣ FONT (tải trực tiếp nếu chưa có) ==========
+FONT_PATH = "/tmp/NotoSans-Regular.ttf"
 if not os.path.exists(FONT_PATH):
-    print("⏳ Cài đặt font NotoSans...")
-    os.system("apt-get update -y && apt-get install -y fonts-noto")
+    print("⏳ Tải font NotoSans từ GitHub...")
+    url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf"
+    try:
+        r = requests.get(url, stream=True, timeout=30)
+        r.raise_for_status()
+        with open(FONT_PATH, "wb") as f:
+            f.write(r.content)
+        print("✅ Font NotoSans đã được tải thành công!")
+    except Exception as e:
+        print(f"❌ Không thể tải font NotoSans: {e}")
+
 pdfmetrics.registerFont(TTFont("NotoSans", FONT_PATH))
 FONT_NAME = "NotoSans"
 
@@ -51,7 +59,7 @@ KEYWORDS = [
     "Bitcoin", "Ethereum", "AI and business", "FDI in Vietnam"
 ]
 
-# ========== 4️⃣ HÀM LẤY TIN ==========
+# ========== 4️⃣ LẤY TIN ==========
 def get_news(api_key, keywords):
     articles = []
     for kw in keywords:
@@ -70,13 +78,13 @@ def get_news(api_key, keywords):
                                 "keyword": kw
                             })
                 else:
-                    print(f"⚠️ Lỗi khi lấy tin '{kw}' ({lang}): {res.status_code}")
+                    print(f"⚠️ Lỗi lấy tin '{kw}' ({lang}): {res.status_code}")
             except Exception as e:
-                print(f"❌ Lỗi khi gọi GNews API: {e}")
+                print(f"❌ Lỗi GNews API: {e}")
             time.sleep(1)
     return articles
 
-# ========== 5️⃣ GEMINI PHÂN TÍCH ==========
+# ========== 5️⃣ PHÂN TÍCH VỚI GEMINI ==========
 def summarize_with_gemini(api_key, articles):
     if not articles:
         return "Không có bài viết mới để phân tích."
@@ -89,7 +97,7 @@ def summarize_with_gemini(api_key, articles):
     1. Tóm tắt xu hướng kinh tế - tài chính nổi bật.
     2. Phân tích tác động đến Việt Nam (FDI, tỷ giá, đầu tư, xuất khẩu...).
     3. Nhận định cơ hội và rủi ro đầu tư (vàng, bạc, chứng khoán, crypto, BĐS).
-    4. Trình bày bằng tiếng Việt, rõ ràng, súc tích và chuyên nghiệp.
+    4. Trình bày bằng tiếng Việt, súc tích và chuyên nghiệp.
 
     DANH SÁCH TIN:
     {titles}
@@ -142,7 +150,7 @@ def send_email(subject, body, attachment_path):
     except Exception as e:
         print(f"❌ Lỗi gửi email: {e}")
 
-# ========== 8️⃣ CHẠY LỊCH ==========
+# ========== 8️⃣ LỊCH TRÌNH ==========
 def run_report():
     print(f"\n🕒 Bắt đầu tạo báo cáo: {datetime.datetime.now()}")
     articles = get_news(GNEWS_API_KEY, KEYWORDS)
