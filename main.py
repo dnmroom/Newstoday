@@ -14,24 +14,29 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import google.generativeai as genai
 
-# --- Cài font Noto Sans ---
+# --- CÀI FONT NOTO SANS (Unicode, tiếng Việt chuẩn) ---
 FONT_PATH = "NotoSans-Regular.ttf"
 if not os.path.exists(FONT_PATH):
-    url = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Regular.ttf"
-    r = requests.get(url)
-    with open(FONT_PATH, "wb") as f:
-        f.write(r.content)
+    url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf"
+    print("⏳ Đang tải font NotoSans từ Google Fonts...")
+    r = requests.get(url, timeout=30)
+    if r.status_code == 200 and r.content[:4] != b"<ht":  # tránh tải nhầm file HTML
+        with open(FONT_PATH, "wb") as f:
+            f.write(r.content)
+        print("✅ Font đã được tải thành công!")
+    else:
+        raise RuntimeError("❌ Không tải được font NotoSans, kiểm tra URL hoặc mạng Render.")
 pdfmetrics.registerFont(TTFont("NotoSans", FONT_PATH))
 FONT_NAME = "NotoSans"
 
-# --- Đọc biến môi trường ---
+# --- ĐỌC BIẾN MÔI TRƯỜNG ---
 GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
-# --- Danh sách từ khóa ---
+# --- DANH SÁCH TỪ KHÓA SONG NGỮ ---
 KEYWORDS = [
     "kinh tế thế giới","kinh tế Việt Nam","thị trường chứng khoán","bất động sản",
     "giá vàng","giá bạc","thị trường dầu mỏ","chính sách tiền tệ","lãi suất ngân hàng",
@@ -43,6 +48,7 @@ KEYWORDS = [
     "Bitcoin","Ethereum","AI and business","FDI in Vietnam"
 ]
 
+# --- LẤY TIN TỪ GNEWS ---
 def get_news(api_key, keywords):
     articles=[]
     for kw in keywords:
@@ -54,12 +60,16 @@ def get_news(api_key, keywords):
                     for a in res.json().get("articles",[]):
                         if a["title"] and a["url"]:
                             articles.append({
-                                "title":a["title"],"url":a["url"],
-                                "source":a["source"]["name"],"keyword":kw})
+                                "title":a["title"],
+                                "url":a["url"],
+                                "source":a["source"]["name"],
+                                "keyword":kw})
                 time.sleep(0.8)
-            except: continue
+            except Exception as e:
+                print(f"⚠️ Lỗi lấy tin: {e}")
     return articles
 
+# --- PHÂN TÍCH BẰNG GEMINI ---
 def summarize_with_gemini(api_key, articles):
     if not articles: return "Không có bài viết mới."
     genai.configure(api_key=api_key)
@@ -71,7 +81,7 @@ def summarize_with_gemini(api_key, articles):
     1. Tóm tắt xu hướng kinh tế - tài chính nổi bật.
     2. Phân tích tác động đến Việt Nam (FDI, tỷ giá, đầu tư, xuất khẩu...).
     3. Nhận định cơ hội và rủi ro đầu tư (vàng, bạc, chứng khoán, crypto, BĐS).
-    4. Trình bày bằng tiếng Việt, rõ ràng, chuyên nghiệp.
+    4. Trình bày bằng tiếng Việt, rõ ràng, súc tích và chuyên nghiệp.
 
     DANH SÁCH TIN:
     {titles}
@@ -81,6 +91,7 @@ def summarize_with_gemini(api_key, articles):
     except Exception as e:
         return f"Lỗi khi gọi Gemini: {e}"
 
+# --- TẠO FILE PDF ---
 def create_pdf(summary, articles):
     fn=f"Bao_cao_Kinh_te_{datetime.date.today()}.pdf"
     doc=SimpleDocTemplate(fn,pagesize=A4)
@@ -103,6 +114,7 @@ def create_pdf(summary, articles):
     doc.build(story)
     return fn
 
+# --- GỬI EMAIL ---
 def send_email(subject,body,attachment):
     try:
         msg=MIMEMultipart()
@@ -117,9 +129,11 @@ def send_email(subject,body,attachment):
         with smtplib.SMTP_SSL("smtp.gmail.com",465) as server:
             server.login(EMAIL_SENDER,EMAIL_PASSWORD)
             server.send_message(msg)
-        print("✅ Email đã được gửi!")
-    except Exception as e: print(f"❌ Gửi email lỗi: {e}")
+        print("✅ Email đã được gửi thành công!")
+    except Exception as e:
+        print(f"❌ Gửi email lỗi: {e}")
 
+# --- CHUỖI TÁC VỤ CHÍNH ---
 def auto_report():
     print("\n==============================")
     print("🕒 Bắt đầu tạo báo cáo:", datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -129,18 +143,17 @@ def auto_report():
     pdf=create_pdf(summ,arts)
     send_email(
         subject=f"[BÁO CÁO KINH TẾ] {datetime.date.today()}",
-        body="Đính kèm báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam (AI tổng hợp).",
+        body="Đính kèm là báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam (AI tổng hợp).",
         attachment=pdf)
-    print("🎯 Hoàn tất!")
+    print("🎯 Hoàn tất báo cáo!")
 
-# Lịch chạy
+# --- LỊCH CHẠY TỰ ĐỘNG ---
 schedule.every().day.at("06:55").do(auto_report)
 schedule.every().day.at("14:15").do(auto_report)
 schedule.every().day.at("19:55").do(auto_report)
 
 print("🚀 Hệ thống khởi động xong, chờ đến khung giờ định sẵn...")
-auto_report()
-
+auto_report()  # chạy ngay 1 lần đầu
 while True:
     schedule.run_pending()
     time.sleep(60)
