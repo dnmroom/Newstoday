@@ -26,36 +26,31 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ========== 1️⃣ CẤU HÌNH BIẾN MÔI TRƯỜNG ==========
-GNEWS_API_KEY = os.getenv("GNEWS_API_KEY", "3cae3dd95afadda50062dbe85325156d")  # Key mới
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "f9828f522b274b2aaa987ac15751bc47")  # Key NewsAPI từ bạn
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDjcqpFXkay_WiK9HLCChX5L0022u3Xw-s")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "manhetc@gmail.com")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "blptzqhzdzvfweiv")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "manhetc@gmail.com")
 PORT = int(os.getenv("PORT", 10000))  # Port cho Render
 
-# ========== 2️⃣ FONT (tải trực tiếp nếu chưa có, fallback Helvetica) ==========
-FONT_PATH = "/tmp/NotoSans-Regular.ttf"
-FONT_NAME = "Helvetica"  # Fallback nếu lỗi
-if not os.path.exists(FONT_PATH):
-    logger.info("⏳ Tải font NotoSans từ GitHub...")
-    url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf"
-    try:
+# ========== 2️⃣ FONT (fallback Helvetica để tránh garbled) ==========
+FONT_NAME = "Helvetica"  # Mặc định, tránh lỗi TTF
+try:
+    FONT_PATH = "/tmp/NotoSans-Regular.ttf"
+    if not os.path.exists(FONT_PATH):
+        logger.info("⏳ Tải font NotoSans...")
+        url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf"
         r = requests.get(url, stream=True, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
         r.raise_for_status()
         with open(FONT_PATH, "wb") as f:
             f.write(r.content)
-        logger.info("✅ Font NotoSans đã được tải thành công!")
-    except Exception as e:
-        logger.warning(f"❌ Không thể tải font NotoSans: {e}")
-
-try:
     pdfmetrics.registerFont(TTFont("NotoSans", FONT_PATH))
     FONT_NAME = "NotoSans"
-    logger.info("✅ Font NotoSans đăng ký OK!")
+    logger.info("✅ Font NotoSans OK!")
 except Exception as e:
-    logger.warning(f"❌ Lỗi đăng ký font: {e}. Dùng Helvetica fallback.")
+    logger.warning(f"❌ Lỗi font: {e}. Dùng Helvetica fallback.")
 
-# ========== 3️⃣ TỪ KHÓA (giữ nguyên, nhưng có thể giảm nếu 429) ==========
+# ========== 3️⃣ TỪ KHÓA (khôi phục đầy đủ như gốc) ==========
 KEYWORDS = [
     # Tiếng Việt
     "kinh tế thế giới", "kinh tế Việt Nam", "thị trường chứng khoán", "bất động sản",
@@ -69,41 +64,28 @@ KEYWORDS = [
     "Bitcoin", "Ethereum", "AI and business", "FDI in Vietnam"
 ]
 
-# ========== 4️⃣ LẤY TIN (thêm retry cho 403/429) ==========
+# ========== 4️⃣ LẤY TIN TỪ NEWSAPI.ORG ==========
 def get_news(api_key, keywords):
     articles = []
     for kw in keywords:
-        for lang in ["vi", "en"]:
-            url = f"https://gnews.io/api/v4/search?q={kw}&lang={lang}&max=2&token={api_key}"
-            retries = 0
-            max_retries = 3
-            while retries < max_retries:
-                try:
-                    res = requests.get(url, timeout=10)
-                    if res.status_code == 200:
-                        for a in res.json().get("articles", []):
-                            if a["title"] and a["url"]:
-                                articles.append({
-                                    "title": a["title"],
-                                    "url": a["url"],
-                                    "source": a["source"]["name"],
-                                    "published": a["publishedAt"],
-                                    "keyword": kw
-                                })
-                        break
-                    elif res.status_code == 403:
-                        logger.error(f"403 Forbidden '{kw}' ({lang}), kiểm tra API key!")
-                        break
-                    elif res.status_code == 429:
-                        logger.warning(f"Rate limit '{kw}' ({lang}), retry {retries + 1}")
-                        time.sleep(2 ** retries)
-                    else:
-                        logger.warning(f"Lỗi lấy tin '{kw}' ({lang}): {res.status_code}")
-                        break
-                except Exception as e:
-                    logger.error(f"❌ Lỗi GNews API: {e}")
-                retries += 1
-            time.sleep(1)
+        url = f"https://newsapi.org/v2/everything?q={kw}&language=en&sortBy=publishedAt&pageSize=2&apiKey={api_key}"
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                for a in res.json().get("articles", []):
+                    if a["title"] and a["url"]:
+                        articles.append({
+                            "title": a["title"],
+                            "url": a["url"],
+                            "source": a["source"]["name"],
+                            "published": a["publishedAt"],
+                            "keyword": kw
+                        })
+            else:
+                logger.warning(f"Lỗi NewsAPI '{kw}': {res.status_code}")
+        except Exception as e:
+            logger.error(f"❌ Lỗi NewsAPI: {e}")
+        time.sleep(0.5)  # Delay để tránh vượt 100 requests/day free tier
     return articles
 
 # ========== 5️⃣ PHÂN TÍCH VỚI GEMINI ==========
@@ -112,7 +94,7 @@ def summarize_with_gemini(api_key, articles):
         return "Không có bài viết mới để phân tích."
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-2.5-flash")
-    titles = "\n".join([f"- {a['title']} ({a['source']})" for a in articles[:20]])  # Giới hạn 20 bài để tránh prompt quá dài
+    titles = "\n".join([f"- {a['title']} ({a['source']})" for a in articles[:20]])
     prompt = f"""
     Bạn là chuyên gia phân tích kinh tế toàn cầu.
     Hãy đọc danh sách tin tức sau và:
@@ -148,13 +130,13 @@ def create_pdf(summary_text, articles):
     story.append(Paragraph(summary_text.replace("\n", "<br/>"), styleVN))
     story.append(Spacer(1, 12))
     story.append(Paragraph("<b>II. DANH SÁCH TIN THAM KHẢO:</b>", styleVN))
-    for a in articles[:20]:  # Giới hạn 20 bài
+    for a in articles[:20]:
         story.append(Paragraph(f"- <a href='{a['url']}'>{a['title']}</a> ({a['source']})", styleVN))
         story.append(Spacer(1, 6))
     doc.build(story)
     return filename
 
-# ========== 7️⃣ GỬI EMAIL (thêm retry cho mạng) ==========
+# ========== 7️⃣ GỬI EMAIL (thêm retry) ==========
 def send_email(subject, body, attachment_path):
     max_retries = 3
     for i in range(max_retries):
@@ -183,7 +165,7 @@ def send_email(subject, body, attachment_path):
 def run_report():
     logger.info(f"\n🕒 Bắt đầu tạo báo cáo: {datetime.datetime.now()}")
     try:
-        articles = get_news(GNEWS_API_KEY, KEYWORDS)
+        articles = get_news(NEWSAPI_KEY, KEYWORDS)
         logger.info(f"📄 Thu được {len(articles)} bài viết.")
         summary = summarize_with_gemini(GEMINI_API_KEY, articles)
         pdf_file = create_pdf(summary, articles)
@@ -196,7 +178,7 @@ def run_report():
     except Exception as e:
         logger.error(f"Lỗi run_report: {e}")
 
-# Chạy test ngay khi start (để kiểm tra)
+# Chạy test ngay khi start
 run_report()
 
 # Lịch trình
@@ -212,7 +194,7 @@ def schedule_runner():
 
 threading.Thread(target=schedule_runner, daemon=True).start()
 
-# ========== 9️⃣ KEEP-ALIVE SERVER (Render Free plan cần có cổng HTTP, thêm /report) ==========
+# ========== 9️⃣ KEEP-ALIVE SERVER (Render Free plan cần có cổng HTTP) ==========
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/report":
@@ -220,11 +202,11 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
                 run_report()
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(b"Service running and report generated!")
+                self.wfile.write(b"Report generated and sent!")
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f"Error generating report: {e}".encode())
+                self.wfile.write(f"Error: {e}".encode())
         else:
             self.send_response(200)
             self.end_headers()
