@@ -38,19 +38,19 @@ FONT_NAME = "Helvetica"  # Mặc định, tránh lỗi TTF
 try:
     FONT_PATH = "/tmp/NotoSans-Regular.ttf"
     if not os.path.exists(FONT_PATH):
-        logger.info("⏳ Tải font NotoSans...")
+        logger.info("⏳ Tải font NotoSans từ GitHub...")
         url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf"
         r = requests.get(url, stream=True, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
         r.raise_for_status()
         with open(FONT_PATH, "wb") as f:
             f.write(r.content)
+        logger.info("✅ Font NotoSans đã được tải thành công!")
     pdfmetrics.registerFont(TTFont("NotoSans", FONT_PATH))
     FONT_NAME = "NotoSans"
-    logger.info("✅ Font NotoSans OK!")
 except Exception as e:
-    logger.warning(f"❌ Lỗi font: {e}. Dùng Helvetica fallback.")
+    logger.warning(f"❌ Không thể tải font NotoSans: {e}")
 
-# ========== 3️⃣ TỪ KHÓA (khôi phục đầy đủ như gốc) ==========
+# ========== 3️⃣ TỪ KHÓA (khôi phục đầy đủ như code ban đầu) ==========
 KEYWORDS = [
     # Tiếng Việt
     "kinh tế thế giới", "kinh tế Việt Nam", "thị trường chứng khoán", "bất động sản",
@@ -82,36 +82,32 @@ def get_news(api_key, keywords):
                             "keyword": kw
                         })
             else:
-                logger.warning(f"Lỗi NewsAPI '{kw}': {res.status_code}")
+                logger.warning(f"⚠️ Lỗi lấy tin '{kw}': {res.status_code}")
         except Exception as e:
-            logger.error(f"❌ Lỗi NewsAPI: {e}")
-        time.sleep(0.5)  # Delay để tránh vượt 100 requests/day free tier
+            logger.error(f"❌ Lỗi GNews API: {e}")
+        time.sleep(0.5)  # Delay nhẹ để tránh rate limit (100 requests/day free)
     return articles
 
-# ========== 5️⃣ PHÂN TÍCH VỚI GEMINI ==========
+# ========== 5️⃣ PHÂN TÍCH VỚI GEMINI (khôi phục prompt gốc) ==========
 def summarize_with_gemini(api_key, articles):
     if not articles:
         return "Không có bài viết mới để phân tích."
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-2.5-flash")
-    titles = "\n".join([f"- {a['title']} ({a['source']})" for a in articles[:20]])
+    titles = "\n".join([f"- {a['title']} ({a['source']})" for a in articles])
     prompt = f"""
-    Bạn là chuyên gia phân tích kinh tế toàn cầu.
-    Hãy đọc danh sách tin tức sau và:
+    Bạn là chuyên gia phân tích kinh tế toàn cầu. Hãy đọc danh sách tin tức sau và:
     1. Tóm tắt xu hướng kinh tế - tài chính nổi bật.
     2. Phân tích tác động đến Việt Nam (FDI, tỷ giá, đầu tư, xuất khẩu...).
     3. Nhận định cơ hội và rủi ro đầu tư (vàng, bạc, chứng khoán, crypto, BĐS).
-    4. Trình bày bằng tiếng Việt, rõ ràng, súc tích và chuyên nghiệp.
-
-    DANH SÁCH TIN:
-    {titles}
+    4. Trình bày bằng tiếng Việt, súc tích và chuyên nghiệp.
+    DANH SÁCH TIN: {titles}
     """
     try:
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
-        logger.error(f"Lỗi Gemini API: {e}")
-        return "Lỗi khi gọi Gemini API."
+        return f"Lỗi Gemini API: {e}"
 
 # ========== 6️⃣ TẠO PDF ==========
 def create_pdf(summary_text, articles):
@@ -130,43 +126,37 @@ def create_pdf(summary_text, articles):
     story.append(Paragraph(summary_text.replace("\n", "<br/>"), styleVN))
     story.append(Spacer(1, 12))
     story.append(Paragraph("<b>II. DANH SÁCH TIN THAM KHẢO:</b>", styleVN))
-    for a in articles[:20]:
+    for a in articles:
         story.append(Paragraph(f"- <a href='{a['url']}'>{a['title']}</a> ({a['source']})", styleVN))
         story.append(Spacer(1, 6))
     doc.build(story)
     return filename
 
-# ========== 7️⃣ GỬI EMAIL (thêm retry) ==========
+# ========== 7️⃣ GỬI EMAIL ==========
 def send_email(subject, body, attachment_path):
-    max_retries = 3
-    for i in range(max_retries):
-        try:
-            msg = MIMEMultipart()
-            msg["From"] = EMAIL_SENDER
-            msg["To"] = EMAIL_RECEIVER
-            msg["Subject"] = subject
-            msg.attach(MIMEText(body, "plain", _charset="utf-8"))
-            with open(attachment_path, "rb") as f:
-                part = MIMEApplication(f.read(), _subtype="pdf")
-                part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(attachment_path)}")
-                msg.attach(part)
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-                server.send_message(msg)
-            logger.info("✅ Email đã gửi thành công!")
-            return
-        except Exception as e:
-            logger.error(f"❌ Lỗi gửi email (lần {i+1}): {e}")
-            if i == max_retries - 1:
-                raise
-            time.sleep(5)
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = EMAIL_SENDER
+        msg["To"] = EMAIL_RECEIVER
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+        with open(attachment_path, "rb") as f:
+            part = MIMEApplication(f.read(), _subtype="pdf")
+            part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(attachment_path)}")
+            msg.attach(part)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+        print("✅ Email đã gửi thành công!")
+    except Exception as e:
+        print(f"❌ Lỗi gửi email: {e}")
 
 # ========== 8️⃣ LỊCH TRÌNH ==========
 def run_report():
-    logger.info(f"\n🕒 Bắt đầu tạo báo cáo: {datetime.datetime.now()}")
+    print(f"\n🕒 Bắt đầu tạo báo cáo: {datetime.datetime.now()}")
     try:
         articles = get_news(NEWSAPI_KEY, KEYWORDS)
-        logger.info(f"📄 Thu được {len(articles)} bài viết.")
+        print(f"📄 Thu được {len(articles)} bài viết.")
         summary = summarize_with_gemini(GEMINI_API_KEY, articles)
         pdf_file = create_pdf(summary, articles)
         send_email(
@@ -174,9 +164,9 @@ def run_report():
             body="Đính kèm là báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam mới nhất (AI tổng hợp).",
             attachment_path=pdf_file
         )
-        logger.info("🎯 Hoàn tất báo cáo!\n")
+        print("🎯 Hoàn tất báo cáo!\n")
     except Exception as e:
-        logger.error(f"Lỗi run_report: {e}")
+        print(f"Lỗi: {e}")
 
 # Chạy test ngay khi start
 run_report()
@@ -187,7 +177,7 @@ schedule.every().day.at("14:15").do(run_report)
 schedule.every().day.at("19:55").do(run_report)
 
 def schedule_runner():
-    logger.info("🚀 Hệ thống khởi động xong, chờ đến khung giờ định sẵn...")
+    print("🚀 Hệ thống khởi động xong, chờ đến khung giờ định sẵn...")
     while True:
         schedule.run_pending()
         time.sleep(30)
@@ -202,19 +192,20 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
                 run_report()
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(b"Report generated and sent!")
+                self.wfile.write(b"Service running and report generated!")
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f"Error: {e}".encode())
+                self.wfile.write(f"Error generating report: {e}".encode())
         else:
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"Service running and scheduling OK")
 
 def run_keepalive_server():
-    server = HTTPServer(("0.0.0.0", PORT), KeepAliveHandler)
-    logger.info(f"🌐 KeepAlive HTTP server running on port {PORT}")
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
+    print(f"🌐 KeepAlive HTTP server running on port {port}")
     server.serve_forever()
 
 run_keepalive_server()
