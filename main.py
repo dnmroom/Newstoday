@@ -36,7 +36,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDjcqpFXkay_WiK9HLCChX5L0022u
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "manhetc@gmail.com")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "blptzqhzdzvfweiv")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "manhetc@gmail.com")
-# Lấy cổng từ biến môi trường PORT của Render, đây là yếu tố quan trọng nhất
 PORT = int(os.getenv("PORT", 10000)) 
 
 # ========== 2️⃣ FONT (DejaVuSans với fallback NotoSans) ==========
@@ -55,13 +54,34 @@ try:
 except Exception as e:
     logger.warning(f"❌ NotoSans fail: {e}. Dùng DejaVuSans (giả định có sẵn).")
 
-# ========== 3️⃣ TỪ KHÓA (chỉ tiếng Anh, 15 keywords để an toàn limit) ==========
+# ========== 3️⃣ TỪ KHÓA (40 keywords, an toàn 80 requests/ngày) ==========
 KEYWORDS = [
-    "global economy", "stock market", "real estate", "gold price",
-    "silver market", "oil price", "monetary policy", "interest rate",
-    "US dollar", "inflation", "cryptocurrency", "Bitcoin", "Ethereum",
-    "AI and business", "FDI in Vietnam"
-]
+    # 1. KINH TẾ VĨ MÔ & CHÍNH SÁCH TIỀN TỆ (10)
+    "global economic outlook", "central bank interest rate", "inflation control policy",
+    "US Federal Reserve decision", "European Union economy", "China economic growth",
+    "supply chain vulnerability", "recession probability", "global trade agreements",
+    "forex market volatility",
+
+    # 2. THỊ TRƯỜNG TÀI SẢN TRUYỀN THỐNG (10)
+    "stock market major index", "real estate commercial", "housing market bubble",
+    "gold price forecast", "silver market investment", "treasury yield curve",
+    "US dollar strength", "equity market valuation", "corporate earnings report",
+    "bond market liquidity",
+
+    # 3. NĂNG LƯỢNG & HÀNG HÓA (7)
+    "crude oil price trend", "natural gas future", "OPEC production quota",
+    "renewable energy investment", "industrial metal demand", "copper future price",
+    "agricultural commodity price",
+
+    # 4. CÔNG NGHỆ & TÀI SẢN KỸ THUẬT SỐ (6)
+    "AI impact on productivity", "semiconductor industry outlook", "Bitcoin price analysis",
+    "cryptocurrency regulation", "decentralized finance trends", "tech industry layoff",
+
+    # 5. KINH TẾ VIỆT NAM VÀ ĐỊA PHƯƠNG (7)
+    "FDI flow to Vietnam", "Vietnam export growth", "Vietnam manufacturing PMI",
+    "Vietnam central bank policy", "Vietnam consumer confidence", "tourism recovery Vietnam",
+    "Vietnam infrastructure investment"
+] # Tổng cộng 40 keywords, 80 requests/ngày (an toàn)
 
 # ========== 4️⃣ LẤY TIN TỪ NEWSAPI ==========
 def get_news(keywords):
@@ -187,8 +207,10 @@ schedule.every().day.at("01:00").do(run_report)  # 8h00 sáng (UTC+7 = UTC 01:00
 schedule.every().day.at("16:00").do(run_report)  # 23h00 tối (UTC+7 = UTC 16:00)
 
 def schedule_runner():
-    logger.info("🚀 Hệ thống khởi động, chờ đến 01:00 hoặc 16:00 UTC...")
+    logger.info("🚀 [SCHEDULER] Hệ thống khởi động, chờ đến 01:00 hoặc 16:00 UTC...")
     while True:
+        # Thêm log kiểm tra định kỳ 
+        # logger.debug("Scheduler running pending tasks...") 
         schedule.run_pending()
         time.sleep(60)
 
@@ -200,7 +222,7 @@ app = Flask(__name__)
 @app.route("/report")
 def trigger_report():
     # Khởi chạy run_report trong một thread mới để không làm blocking Flask server
-    threading.Thread(target=run_report).start()
+    threading.Thread(target=run_report, daemon=True).start()
     return "Report generation initiated. Check logs for status.", 202 
 
 # Route Health Check (Bắt buộc phải có, Render sẽ gọi route này)
@@ -215,11 +237,11 @@ def index():
 
 # ========== 🔋 CHẠY ỨNG DỤNG ==========
 if __name__ == "__main__":
-    # Khởi động scheduler trên thread riêng
+    # Khởi động scheduler trên thread riêng (Đảm bảo là daemon=True)
     scheduler_thread = threading.Thread(target=schedule_runner, daemon=True)
     scheduler_thread.start()
 
     # Chạy Flask server chính để giữ instance sống
     logger.info(f"🌐 Flask KeepAlive server running on port {PORT} on host 0.0.0.0")
-    # Sử dụng host='0.0.0.0' và port=PORT để tương thích với Render
-    app.run(host='0.0.0.0', port=PORT, threaded=True) 
+    # Sử dụng host='0.0.0.0' và port=PORT
+    app.run(host='0.0.0.0', port=PORT) 
