@@ -12,7 +12,10 @@ import time
 import schedule
 import threading
 import logging
-from http.server import BaseHTTPRequestHandler, HTTPServer
+# --- THAY ĐỔI: Xóa http.server, Thêm Flask ---
+# from http.server import BaseHTTPRequestHandler, HTTPServer
+from flask import Flask 
+# ---------------------------------------------
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -33,7 +36,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDjcqpFXkay_WiK9HLCChX5L0022u
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "manhetc@gmail.com")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "blptzqhzdzvfweiv")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "manhetc@gmail.com")
-PORT = int(os.getenv("PORT", 10000))
+# Lấy cổng từ biến môi trường PORT của Render, đây là yếu tố quan trọng nhất
+PORT = int(os.getenv("PORT", 10000)) 
 
 # ========== 2️⃣ FONT (DejaVuSans với fallback NotoSans) ==========
 FONT_PATH_NOTO = "/tmp/NotoSans-Regular.ttf"
@@ -57,7 +61,7 @@ KEYWORDS = [
     "silver market", "oil price", "monetary policy", "interest rate",
     "US dollar", "inflation", "cryptocurrency", "Bitcoin", "Ethereum",
     "AI and business", "FDI in Vietnam"
-]  # 15 keywords, ~15 requests/lần, an toàn 100/day
+]
 
 # ========== 4️⃣ LẤY TIN TỪ NEWSAPI ==========
 def get_news(keywords):
@@ -79,10 +83,10 @@ def get_news(keywords):
                         })
             elif res.status_code == 429:
                 logger.warning(f"⚠️ Rate limit với từ khóa '{kw}'. Bỏ qua.")
-                time.sleep(60)  # Chờ 1 phút nếu rate limit
+                time.sleep(60)
             else:
                 logger.warning(f"⚠️ Lỗi NewsAPI ({res.status_code}) với từ khóa '{kw}': {res.json().get('message', 'Không rõ')}")
-            time.sleep(3)  # Delay 3 giây để tránh rate limit
+            time.sleep(3)
         except Exception as e:
             logger.error(f"❌ Lỗi NewsAPI: {e}")
             time.sleep(3)
@@ -188,27 +192,26 @@ def schedule_runner():
         schedule.run_pending()
         time.sleep(60)
 
-# ========== 🔟 KEEP-ALIVE SERVER (Render Free Plan) ==========
-class KeepAliveHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/report":
-            run_report()
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Report generated and sent!")
-        elif self.path == "/health":
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        else:
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Service running. /report to trigger manually.")
+# ========== 🔟 KEEP-ALIVE SERVER (Dùng Flask) ==========
+# Khởi tạo ứng dụng Flask
+app = Flask(__name__)
 
-def run_keepalive_server():
-    server = HTTPServer(("0.0.0.0", PORT), KeepAliveHandler)
-    logger.info(f"🌐 KeepAlive server running on port {PORT}")
-    server.serve_forever()
+# Route để tạo báo cáo thủ công (khi truy cập /report)
+@app.route("/report")
+def trigger_report():
+    # Khởi chạy run_report trong một thread mới để không làm blocking Flask server
+    threading.Thread(target=run_report).start()
+    return "Report generation initiated. Check logs for status.", 202 
+
+# Route Health Check (Bắt buộc phải có, Render sẽ gọi route này)
+@app.route("/health")
+def health_check():
+    return "OK", 200
+
+# Route mặc định
+@app.route("/")
+def index():
+    return f"Service running. <a href='/report'>Click here</a> to trigger report manually or wait for scheduled run."
 
 # ========== 🔋 CHẠY ỨNG DỤNG ==========
 if __name__ == "__main__":
@@ -216,5 +219,7 @@ if __name__ == "__main__":
     scheduler_thread = threading.Thread(target=schedule_runner, daemon=True)
     scheduler_thread.start()
 
-    # Chạy server chính để giữ instance sống
-    run_keepalive_server()
+    # Chạy Flask server chính để giữ instance sống
+    logger.info(f"🌐 Flask KeepAlive server running on port {PORT} on host 0.0.0.0")
+    # Sử dụng host='0.0.0.0' và port=PORT để tương thích với Render
+    app.run(host='0.0.0.0', port=PORT, threaded=True) 
