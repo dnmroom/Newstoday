@@ -1,24 +1,19 @@
 # ====================================================
 # 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM
-# Gemini 2.5 Flash, keyword tiếng Anh, PDF Unicode (DejaVuSans), gửi Gmail tự động
-# Sử dụng NewsAPI.org với key f9828f522b274b2aaa987ac15751bc47
+# Gemini 2.5 Flash, keyword tiếng Anh & Việt, PDF Unicode (NotoSans), gửi SendGrid
+# Sử dụng NewsAPI.org (miễn phí 80 requests/ngày)
 # ====================================================
 
 import os
 import requests
 import datetime
-import smtplib
 import time
 import schedule
 import threading
 import logging
-# --- THAY ĐỔI: Xóa http.server, Thêm Flask ---
-# from http.server import BaseHTTPRequestHandler, HTTPServer
-from flask import Flask 
-# ---------------------------------------------
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.application import MIMEApplication
+from flask import Flask
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Email, Content, Mail, Attachment, FileContent, FileName, FileType, Disposition
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -33,14 +28,14 @@ logger = logging.getLogger(__name__)
 # ========== 1️⃣ CẤU HÌNH ==========
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "f9828f522b274b2aaa987ac15751bc47")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDjcqpFXkay_WiK9HLCChX5L0022u3Xw-s")
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "manhetc@gmail.com")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "blptzqhzdzvfweiv")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "manhetc@gmail.com")
-PORT = int(os.getenv("PORT", 10000)) 
+PORT = int(os.getenv("PORT", 10000))
 
-# ========== 2️⃣ FONT (DejaVuSans với fallback NotoSans) ==========
+# ========== 2️⃣ FONT (NotoSans ưu tiên) ==========
 FONT_PATH_NOTO = "/tmp/NotoSans-Regular.ttf"
-FONT_NAME = "DejaVuSans"  # Giả định DejaVuSans có sẵn trên Render
+FONT_NAME = "Helvetica"  # Fallback
 try:
     if not os.path.exists(FONT_PATH_NOTO):
         logger.info("⏳ Tải font NotoSans...")
@@ -52,36 +47,23 @@ try:
     FONT_NAME = "NotoSans"
     logger.info("✅ Font NotoSans OK!")
 except Exception as e:
-    logger.warning(f"❌ NotoSans fail: {e}. Dùng DejaVuSans (giả định có sẵn).")
+    logger.warning(f"❌ Lỗi tải font: {e}. Sử dụng Helvetica fallback.")
+    FONT_NAME = "Helvetica"
 
-# ========== 3️⃣ TỪ KHÓA (40 keywords, an toàn 80 requests/ngày) ==========
+# ========== 3️⃣ TỪ KHÓA (32 keywords, 64 requests/ngày) ==========
 KEYWORDS = [
-    # 1. KINH TẾ VĨ MÔ & CHÍNH SÁCH TIỀN TỆ (10)
-    "global economic outlook", "central bank interest rate", "inflation control policy",
-    "US Federal Reserve decision", "European Union economy", "China economic growth",
-    "supply chain vulnerability", "recession probability", "global trade agreements",
-    "forex market volatility",
-
-    # 2. THỊ TRƯỜNG TÀI SẢN TRUYỀN THỐNG (10)
-    "stock market major index", "real estate commercial", "housing market bubble",
-    "gold price forecast", "silver market investment", "treasury yield curve",
-    "US dollar strength", "equity market valuation", "corporate earnings report",
-    "bond market liquidity",
-
-    # 3. NĂNG LƯỢNG & HÀNG HÓA (7)
-    "crude oil price trend", "natural gas future", "OPEC production quota",
-    "renewable energy investment", "industrial metal demand", "copper future price",
-    "agricultural commodity price",
-
-    # 4. CÔNG NGHỆ & TÀI SẢN KỸ THUẬT SỐ (6)
-    "AI impact on productivity", "semiconductor industry outlook", "Bitcoin price analysis",
-    "cryptocurrency regulation", "decentralized finance trends", "tech industry layoff",
-
-    # 5. KINH TẾ VIỆT NAM VÀ ĐỊA PHƯƠNG (7)
-    "FDI flow to Vietnam", "Vietnam export growth", "Vietnam manufacturing PMI",
-    "Vietnam central bank policy", "Vietnam consumer confidence", "tourism recovery Vietnam",
-    "Vietnam infrastructure investment"
-] # Tổng cộng 40 keywords, 80 requests/ngày (an toàn)
+    "global economy", "Vietnam economy", "stock market", "real estate",
+    "gold price", "silver market", "oil price", "monetary policy",
+    "interest rate", "US dollar", "inflation", "FDI Vietnam",
+    "export growth", "manufacturing PMI", "labor market",
+    "AI economy", "tech industry", "cryptocurrency",
+    "Bitcoin", "Ethereum", "tourism Vietnam",
+    "infrastructure Vietnam", "trade agreements",
+    "supply chain", "recession", "central bank",
+    "forex market", "consumer confidence",
+    "renewable energy", "industrial metals",
+    "housing market", "corporate earnings"
+]
 
 # ========== 4️⃣ LẤY TIN TỪ NEWSAPI ==========
 def get_news(keywords):
@@ -106,44 +88,51 @@ def get_news(keywords):
                 time.sleep(60)
             else:
                 logger.warning(f"⚠️ Lỗi NewsAPI ({res.status_code}) với từ khóa '{kw}': {res.json().get('message', 'Không rõ')}")
-            time.sleep(3)
+            time.sleep(1)  # Delay 1s để tránh vượt 80 requests/ngày
         except Exception as e:
             logger.error(f"❌ Lỗi NewsAPI: {e}")
-            time.sleep(3)
+            time.sleep(1)
     logger.info(f"Thu được {len(articles)} bài viết.")
     return articles
 
-# ========== 5️⃣ PHÂN TÍCH GEMINI (theo định hướng) ==========
+# ========== 5️⃣ PHÂN TÍCH GEMINI (Chia batch) ==========
 def summarize_with_gemini(api_key, articles):
     if not articles:
-        return "Không có bài viết mới để phân tích. Kiểm tra API key NewsAPI hoặc rate limit."
+        return "Không có bài viết mới để phân tích."
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-2.5-flash")
-    titles = "\n".join([f"- {a['title']} ({a['source']})" for a in articles[:15]])
-    prompt = f"""
-    Bạn là chuyên gia phân tích kinh tế toàn cầu.
-    Hãy đọc danh sách tin tức sau và:
-    1. Tóm tắt xu hướng kinh tế - tài chính nổi bật.
-    2. Phân tích tác động đến Việt Nam (FDI, tỷ giá, đầu tư, xuất khẩu...).
-    3. Nhận định cơ hội và rủi ro đầu tư (vàng, bạc, chứng khoán, crypto, BĐS).
-    4. Trình bày bằng tiếng Việt, rõ ràng, súc tích và chuyên nghiệp.
+    summary = ""
+    batch_size = 10
+    for i in range(0, len(articles), batch_size):
+        batch_articles = articles[i:i + batch_size]
+        titles = "\n".join([f"- {a['title']} ({a['source']})" for a in batch_articles])
+        prompt = f"""
+        Bạn là chuyên gia phân tích kinh tế toàn cầu.
+        Hãy đọc danh sách tin tức sau và:
+        1. Tóm tắt xu hướng kinh tế - tài chính nổi bật.
+        2. Phân tích tác động đến Việt Nam (FDI, tỷ giá, đầu tư, xuất khẩu...).
+        3. Nhận định cơ hội và rủi ro đầu tư (vàng, bạc, chứng khoán, crypto, BĐS).
+        4. Trình bày bằng tiếng Việt, rõ ràng, súc tích và chuyên nghiệp.
 
-    DANH SÁCH TIN:
-    {titles}
-    """
-    try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        logger.error(f"❌ Lỗi Gemini: {e}")
-        return f"Lỗi Gemini: {e}"
+        DANH SÁCH TIN:
+        {titles}
+        """
+        try:
+            response = model.generate_content(prompt)
+            summary += response.text.strip() + "\n\n"
+            logger.info(f"✅ Hoàn thành batch {i//batch_size + 1} với {len(batch_articles)} bài.")
+            time.sleep(30)  # Delay 30s giữa các batch để tránh vượt quota 10 requests/phút
+        except Exception as e:
+            logger.error(f"❌ Lỗi Gemini batch {i//batch_size + 1}: {e}")
+            summary += "Lỗi Gemini trong batch này.\n\n"
+    return summary.strip()
 
 # ========== 6️⃣ TẠO PDF ==========
 def create_pdf(summary_text, articles):
     filename = f"Bao_cao_Kinh_te_{datetime.date.today()}.pdf"
     doc = SimpleDocTemplate(filename, pagesize=A4)
     styles = getSampleStyleSheet()
-    styleVN = ParagraphStyle('VN', parent=styles['Normal'], fontName=FONT_NAME, fontSize=11, encoding='utf-8')
+    styleVN = ParagraphStyle('VN', parent=styles['Normal'], fontName=FONT_NAME, fontSize=11, leading=14, encoding='utf-8')
     titleStyle = ParagraphStyle('TitleVN', parent=styles['Title'], fontName=FONT_NAME, fontSize=16, alignment=1, encoding='utf-8')
 
     story = []
@@ -152,7 +141,9 @@ def create_pdf(summary_text, articles):
     story.append(Paragraph(f"Ngày: {datetime.date.today()}", styleVN))
     story.append(Spacer(1, 12))
     story.append(Paragraph("<b>I. PHÂN TÍCH (Gemini 2.5 Flash):</b>", styleVN))
-    story.append(Paragraph(summary_text.replace("\n", "<br/>"), styleVN))
+    for para in summary_text.split("\n\n"):
+        story.append(Paragraph(para.replace("\n", "<br/>"), styleVN))
+        story.append(Spacer(1, 6))
     story.append(Spacer(1, 12))
     story.append(Paragraph("<b>II. DANH SÁCH TIN THAM KHẢO:</b>", styleVN))
     for a in articles:
@@ -161,29 +152,33 @@ def create_pdf(summary_text, articles):
     doc.build(story)
     return filename
 
-# ========== 7️⃣ GỬI EMAIL ==========
+# ========== 7️⃣ GỬI EMAIL (SendGrid) ==========
 def send_email(subject, body, attachment_path):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            msg = MIMEMultipart()
-            msg["From"] = EMAIL_SENDER
-            msg["To"] = EMAIL_RECEIVER
-            msg["Subject"] = subject
-            msg.attach(MIMEText(body, "plain", "utf-8"))
+            sg = SendGridAPIClient(SENDGRID_API_KEY)
             with open(attachment_path, "rb") as f:
-                part = MIMEApplication(f.read(), _subtype="pdf")
-                part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(attachment_path)}")
-                msg.attach(part)
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-                server.send_message(msg)
-            logger.info("✅ Email đã được gửi thành công!")
-            return
+                pdf_data = f.read()
+            from_email = Email(EMAIL_SENDER)
+            to_email = Email(EMAIL_RECEIVER)
+            content = Content("text/plain", body)
+            mail = Mail(from_email, subject, to_email, content)
+            attachment = Attachment(
+                FileContent(pdf_data),
+                FileName(os.path.basename(attachment_path)),
+                FileType("application/pdf"),
+                Disposition("attachment")
+            )
+            mail.attachment = attachment
+            response = sg.client.mail.send.post(request_body=mail.get())
+            if response.status_code == 202:
+                logger.info("✅ Email đã được gửi thành công!")
+                return
         except Exception as e:
             logger.error(f"❌ Lỗi email (lần {attempt + 1}): {e}")
             if attempt < max_retries - 1:
-                time.sleep(5)
+                time.sleep(15)  # Tăng delay lên 15s để chờ mạng Render
 
 # ========== 8️⃣ CHẠY BÁO CÁO ==========
 def run_report():
@@ -194,54 +189,42 @@ def run_report():
         summary = summarize_with_gemini(GEMINI_API_KEY, articles)
         pdf_file = create_pdf(summary, articles)
         send_email(
-            subject="[BÁO CÁO KINH TẾ TOÀN CẦU & VIỆT NAM]",
-            body="Đính kèm là báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam mới nhất (AI tổng hợp).",
-            attachment_path=pdf_file
+            "[BÁO CÁO KINH TẾ TOÀN CẦU & VIỆT NAM]",
+            "Đính kèm là báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam mới nhất (AI tổng hợp).",
+            pdf_file
         )
         logger.info("🎯 Hoàn tất báo cáo!")
     except Exception as e:
         logger.error(f"❌ Lỗi tổng thể: {e}")
 
-# ========== 9️⃣ LỊCH TRÌNH (8h00 sáng và 23h00 tối UTC+7) ==========
-schedule.every().day.at("01:00").do(run_report)  # 8h00 sáng (UTC+7 = UTC 01:00)
-schedule.every().day.at("16:00").do(run_report)  # 23h00 tối (UTC+7 = UTC 16:00)
+# ========== 9️⃣ LỊCH TRÌNH (08:00 và 23:00 UTC+7) ==========
+schedule.every().day.at("01:00").do(run_report)  # 08:00 sáng (UTC+7 = UTC 01:00)
+schedule.every().day.at("16:00").do(run_report)  # 23:00 tối (UTC+7 = UTC 16:00)
 
 def schedule_runner():
     logger.info("🚀 [SCHEDULER] Hệ thống khởi động, chờ đến 01:00 hoặc 16:00 UTC...")
     while True:
-        # Thêm log kiểm tra định kỳ 
-        # logger.debug("Scheduler running pending tasks...") 
         schedule.run_pending()
         time.sleep(60)
 
-# ========== 🔟 KEEP-ALIVE SERVER (Dùng Flask) ==========
-# Khởi tạo ứng dụng Flask
+# ========== 🔟 KEEP-ALIVE SERVER (Flask) ==========
 app = Flask(__name__)
 
-# Route để tạo báo cáo thủ công (khi truy cập /report)
 @app.route("/report")
 def trigger_report():
-    # Khởi chạy run_report trong một thread mới để không làm blocking Flask server
-    threading.Thread(target=run_report, daemon=True).start()
-    return "Report generation initiated. Check logs for status.", 202 
+    threading.Thread(target=run_report).start()
+    return "Report generation initiated. Check logs for status.", 202
 
-# Route Health Check (Bắt buộc phải có, Render sẽ gọi route này)
 @app.route("/health")
 def health_check():
     return "OK", 200
 
-# Route mặc định
 @app.route("/")
 def index():
     return f"Service running. <a href='/report'>Click here</a> to trigger report manually or wait for scheduled run."
 
-# ========== 🔋 CHẠY ỨNG DỤNG ==========
 if __name__ == "__main__":
-    # Khởi động scheduler trên thread riêng (Đảm bảo là daemon=True)
     scheduler_thread = threading.Thread(target=schedule_runner, daemon=True)
     scheduler_thread.start()
-
-    # Chạy Flask server chính để giữ instance sống
     logger.info(f"🌐 Flask KeepAlive server running on port {PORT} on host 0.0.0.0")
-    # Sử dụng host='0.0.0.0' và port=PORT
-    app.run(host='0.0.0.0', port=PORT) 
+    app.run(host='0.0.0.0', port=PORT, threaded=True)
