@@ -2,7 +2,7 @@
 # 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM
 # Gemini 2.5 Flash, keyword tiếng Anh & Việt, PDF Unicode (NotoSans)
 # GỬI EMAIL: Dùng thư viện SMTPLIB (Miễn phí qua SMTP Server)
-# NewsAPI: 20 keywords * 2 bài/kw * 2 lần/ngày = 80 requests/ngày (Tối ưu miễn phí)
+# TỐI ƯU: Ngăn chặn chạy đồng thời (Lock) & Khắc phục Rate Limit NewsAPI
 # ====================================================
 
 import os
@@ -32,12 +32,14 @@ import google.generativeai as genai
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Lock để ngăn chặn nhiều luồng chạy báo cáo cùng lúc
+REPORT_LOCK = threading.Lock()
+
 # ========== 1️⃣ CẤU HÌNH ==========
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "f9828f522b274b2aaa987ac15751bc47")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDjcqpFXkay_WiK9HLCChX5L0022u3Xw-s")
 
 # --- Cấu hình SMTP MỚI (Miễn phí qua Gmail/Outlook) ---
-# LƯU Ý QUAN TRỌNG: Phải dùng APP PASSWORD/Mật khẩu Ứng dụng nếu dùng Gmail/Outlook
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com") 
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))            
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "manhetc@gmail.com") 
@@ -64,7 +66,7 @@ except Exception as e:
     logger.warning(f"❌ Lỗi tải font: {e}. Sử dụng Helvetica fallback.")
     FONT_NAME = "Helvetica"
 
-# ========== 3️⃣ TỪ KHÓA (ĐÃ GIẢM CÒN 20 KEY TỐI ƯU QUOTA MIỄN PHÍ) ==========
+# ========== 3️⃣ TỪ KHÓA (20 KEY TỐI ƯU QUOTA MIỄN PHÍ) ==========
 KEYWORDS = [
     "global economy", "Vietnam economy", "stock market", "real estate",
     "gold price", "silver price", "monetary policy", "interest rate",
@@ -74,13 +76,12 @@ KEYWORDS = [
     "recession"
 ]
 
-# ========== 4️⃣ LẤY TIN TỪ NEWSAPI (ĐÃ TỐI ƯU HÓA RATE LIMIT) ==========
+# ========== 4️⃣ LẤY TIN TỪ NEWSAPI (TỐI ƯU RATE LIMIT) ==========
 def get_news(keywords):
     articles = []
     logger.info(f"🔄 Đang lấy tin từ NewsAPI với {len(keywords)} từ khóa...")
     
     for kw in keywords:
-        # Lấy 2 bài cho mỗi keyword. (20 kw * 2 bài/kw = 40 requests/lần chạy)
         url = f"https://newsapi.org/v2/everything?q={kw}&language=en&pageSize=2&apiKey={NEWSAPI_KEY}"
         try:
             res = requests.get(url, timeout=10)
@@ -98,15 +99,15 @@ def get_news(keywords):
                         })
                 
             elif status_code == 429:
-                # 💥 Khắc phục Rate Limit (429) - Tạm dừng LÂU HƠN để đảm bảo API reset
+                # Xử lý Rate Limit (429) bằng cách tạm dừng lâu (10 phút)
                 logger.error(f"❌ VƯỢT RATE LIMIT (429) với từ khóa '{kw}'. Tạm dừng 10 phút để reset API quota/tần suất.")
                 time.sleep(600)  # Tạm dừng 10 phút (600 giây)
-                continue # Bỏ qua từ khóa này trong lần thử hiện tại và tiếp tục từ từ khóa tiếp theo.
+                continue 
                 
             else:
                 logger.warning(f"⚠️ Lỗi NewsAPI ({status_code}) với từ khóa '{kw}': {res.json().get('message', 'Không rõ')}")
             
-            # Tăng mạnh Delay giữa các request để tránh Rate Limit theo tần suất
+            # Tăng Delay giữa các request để tránh Rate Limit theo tần suất
             time.sleep(5) 
             
         except Exception as e:
@@ -125,7 +126,6 @@ def summarize_with_gemini(api_key, articles):
     summary = ""
     batch_size = 10
     
-    # Lọc bài viết trùng lặp (dựa trên tiêu đề)
     unique_articles = list({a['title']: a for a in articles}.values())
     logger.info(f"Đã lọc còn {len(unique_articles)} bài viết duy nhất.")
     
@@ -147,7 +147,6 @@ def summarize_with_gemini(api_key, articles):
             response = model.generate_content(prompt)
             summary += response.text.strip() + "\n\n"
             logger.info(f"✅ Hoàn thành batch {i//batch_size + 1} với {len(batch_articles)} bài.")
-            # Delay 30s giữa các batch để tránh vượt quota 10 requests/phút của Gemini
             time.sleep(30) 
         except Exception as e:
             logger.error(f"❌ Lỗi Gemini batch {i//batch_size + 1}: {e}")
@@ -195,7 +194,6 @@ def send_email(subject, body, attachment_path):
             msg['From'] = EMAIL_SENDER
             msg['To'] = EMAIL_RECEIVER
             msg['Subject'] = subject
-            # Nội dung email (dùng utf-8 cho tiếng Việt)
             msg.attach(MIMEText(body, 'plain', 'utf-8'))
             
             # 2. Thêm file đính kèm PDF
@@ -228,11 +226,17 @@ def send_email(subject, body, attachment_path):
             else:
                 logger.error("❌ Gửi email thất bại sau tất cả lần thử.")
 
-# ========== 8️⃣ CHẠY BÁO CÁO ==========
+# ========== 8️⃣ CHẠY BÁO CÁO (ĐÃ THÊM LOCK) ==========
 def run_report():
-    logger.info(f"🕒 Bắt đầu tạo báo cáo: {datetime.datetime.now()}")
+    # Ngăn chặn nhiều luồng chạy cùng lúc
+    if not REPORT_LOCK.acquire(blocking=False):
+        logger.warning("🚫 Đang có báo cáo khác chạy. Bỏ qua trigger thủ công lặp lại.")
+        return 
+        
     pdf_file = None
     try:
+        logger.info(f"🕒 Bắt đầu tạo báo cáo: {datetime.datetime.now()}")
+        
         articles = get_news(KEYWORDS)
         
         if articles:
@@ -252,11 +256,11 @@ def run_report():
     except Exception as e:
         logger.error(f"❌ Lỗi tổng thể: {e}")
     finally:
-        # Dọn dẹp file PDF 
+        # Dọn dẹp file PDF và Giải phóng Lock
         if pdf_file and os.path.exists(pdf_file):
             os.remove(pdf_file)
             logger.info(f"🗑️ Đã xóa file tạm: {pdf_file}")
-
+        REPORT_LOCK.release() # Giải phóng lock, dù có lỗi hay không
 
 # ========== 9️⃣ LỊCH TRÌNH (08:00 và 23:00 UTC+7) ==========
 schedule.every().day.at("01:00").do(run_report)  # 08:00 sáng (UTC+7 = UTC 01:00)
@@ -273,6 +277,7 @@ app = Flask(__name__)
 
 @app.route("/report")
 def trigger_report():
+    # Trigger trong một luồng riêng, nhưng được bảo vệ bằng Lock
     threading.Thread(target=run_report).start()
     return "Report generation initiated. Check logs for status.", 202
 
