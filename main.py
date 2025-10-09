@@ -1,7 +1,8 @@
 # ====================================================
 # 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM
-# Gemini 2.5 Flash, keyword tiếng Anh & Việt, PDF Unicode (NotoSans), gửi SendGrid
-# Sử dụng NewsAPI.org (miễn phí 80 requests/ngày)
+# Gemini 2.5 Flash, keyword tiếng Anh & Việt, PDF Unicode (NotoSans)
+# GỬI EMAIL: Dùng thư viện SMTPLIB (Miễn phí qua SMTP Server)
+# NewsAPI: 20 keywords * 2 bài/kw * 2 lần/ngày = 80 requests/ngày (Tối ưu miễn phí)
 # ====================================================
 
 import os
@@ -12,8 +13,14 @@ import schedule
 import threading
 import logging
 from flask import Flask
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Email, Content, Mail, Attachment, FileContent, FileName, FileType, Disposition
+
+# THƯ VIỆN GỬI EMAIL MỚI (THAY THẾ SENDGRID)
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.mime.text import MIMEText
+from email import encoders
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -28,14 +35,21 @@ logger = logging.getLogger(__name__)
 # ========== 1️⃣ CẤU HÌNH ==========
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "f9828f522b274b2aaa987ac15751bc47")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDjcqpFXkay_WiK9HLCChX5L0022u3Xw-s")
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER", "manhetc@gmail.com")
+
+# --- Cấu hình SMTP MỚI (Miễn phí qua Gmail/Outlook) ---
+# LƯU Ý QUAN TRỌNG: Phải dùng APP PASSWORD/Mật khẩu Ứng dụng nếu dùng Gmail/Outlook
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com") 
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))            
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "manhetc@gmail.com") 
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")              
+
+EMAIL_SENDER = SMTP_USERNAME                          
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "manhetc@gmail.com")
 PORT = int(os.getenv("PORT", 10000))
 
 # ========== 2️⃣ FONT (NotoSans ưu tiên) ==========
 FONT_PATH_NOTO = "/tmp/NotoSans-Regular.ttf"
-FONT_NAME = "Helvetica"  # Fallback
+FONT_NAME = "Helvetica" 
 try:
     if not os.path.exists(FONT_PATH_NOTO):
         logger.info("⏳ Tải font NotoSans...")
@@ -50,30 +64,29 @@ except Exception as e:
     logger.warning(f"❌ Lỗi tải font: {e}. Sử dụng Helvetica fallback.")
     FONT_NAME = "Helvetica"
 
-# ========== 3️⃣ TỪ KHÓA (32 keywords, 64 requests/ngày) ==========
+# ========== 3️⃣ TỪ KHÓA (ĐÃ GIẢM CÒN 20 KEY TỐI ƯU QUOTA MIỄN PHÍ) ==========
 KEYWORDS = [
     "global economy", "Vietnam economy", "stock market", "real estate",
-    "gold price", "silver market", "oil price", "monetary policy",
-    "interest rate", "US dollar", "inflation", "FDI Vietnam",
-    "export growth", "manufacturing PMI", "labor market",
-    "AI economy", "tech industry", "cryptocurrency",
-    "Bitcoin", "Ethereum", "tourism Vietnam",
-    "infrastructure Vietnam", "trade agreements",
-    "supply chain", "recession", "central bank",
-    "forex market", "consumer confidence",
-    "renewable energy", "industrial metals",
-    "housing market", "corporate earnings"
+    "gold price", "silver price", "monetary policy", "interest rate",
+    "US dollar", "inflation", "FDI Vietnam", "export growth",
+    "manufacturing PMI", "AI economy", "tech industry", "cryptocurrency",
+    "infrastructure Vietnam", "trade agreements", "supply chain",
+    "recession"
 ]
 
-# ========== 4️⃣ LẤY TIN TỪ NEWSAPI ==========
+# ========== 4️⃣ LẤY TIN TỪ NEWSAPI (ĐÃ TỐI ƯU HÓA RATE LIMIT) ==========
 def get_news(keywords):
     articles = []
-    logger.info("🔄 Đang lấy tin từ NewsAPI...")
+    logger.info(f"🔄 Đang lấy tin từ NewsAPI với {len(keywords)} từ khóa...")
+    
     for kw in keywords:
+        # Lấy 2 bài cho mỗi keyword. (20 kw * 2 bài/kw = 40 requests/lần chạy)
         url = f"https://newsapi.org/v2/everything?q={kw}&language=en&pageSize=2&apiKey={NEWSAPI_KEY}"
         try:
             res = requests.get(url, timeout=10)
-            if res.status_code == 200:
+            status_code = res.status_code
+            
+            if status_code == 200:
                 for a in res.json().get("articles", []):
                     if a.get("title") and a.get("url"):
                         articles.append({
@@ -83,15 +96,23 @@ def get_news(keywords):
                             "published": a.get("publishedAt"),
                             "keyword": kw
                         })
-            elif res.status_code == 429:
-                logger.warning(f"⚠️ Rate limit với từ khóa '{kw}'. Bỏ qua.")
-                time.sleep(60)
+                
+            elif status_code == 429:
+                # 💥 Khắc phục Rate Limit (429) - Tạm dừng LÂU HƠN để đảm bảo API reset
+                logger.error(f"❌ VƯỢT RATE LIMIT (429) với từ khóa '{kw}'. Tạm dừng 10 phút để reset API quota/tần suất.")
+                time.sleep(600)  # Tạm dừng 10 phút (600 giây)
+                continue # Bỏ qua từ khóa này trong lần thử hiện tại và tiếp tục từ từ khóa tiếp theo.
+                
             else:
-                logger.warning(f"⚠️ Lỗi NewsAPI ({res.status_code}) với từ khóa '{kw}': {res.json().get('message', 'Không rõ')}")
-            time.sleep(1)  # Delay 1s để tránh vượt 80 requests/ngày
+                logger.warning(f"⚠️ Lỗi NewsAPI ({status_code}) với từ khóa '{kw}': {res.json().get('message', 'Không rõ')}")
+            
+            # Tăng mạnh Delay giữa các request để tránh Rate Limit theo tần suất
+            time.sleep(5) 
+            
         except Exception as e:
-            logger.error(f"❌ Lỗi NewsAPI: {e}")
-            time.sleep(1)
+            logger.error(f"❌ Lỗi mạng/kết nối NewsAPI: {e}")
+            time.sleep(5)
+            
     logger.info(f"Thu được {len(articles)} bài viết.")
     return articles
 
@@ -103,8 +124,13 @@ def summarize_with_gemini(api_key, articles):
     model = genai.GenerativeModel("gemini-2.5-flash")
     summary = ""
     batch_size = 10
-    for i in range(0, len(articles), batch_size):
-        batch_articles = articles[i:i + batch_size]
+    
+    # Lọc bài viết trùng lặp (dựa trên tiêu đề)
+    unique_articles = list({a['title']: a for a in articles}.values())
+    logger.info(f"Đã lọc còn {len(unique_articles)} bài viết duy nhất.")
+    
+    for i in range(0, len(unique_articles), batch_size):
+        batch_articles = unique_articles[i:i + batch_size]
         titles = "\n".join([f"- {a['title']} ({a['source']})" for a in batch_articles])
         prompt = f"""
         Bạn là chuyên gia phân tích kinh tế toàn cầu.
@@ -121,7 +147,8 @@ def summarize_with_gemini(api_key, articles):
             response = model.generate_content(prompt)
             summary += response.text.strip() + "\n\n"
             logger.info(f"✅ Hoàn thành batch {i//batch_size + 1} với {len(batch_articles)} bài.")
-            time.sleep(30)  # Delay 30s giữa các batch để tránh vượt quota 10 requests/phút
+            # Delay 30s giữa các batch để tránh vượt quota 10 requests/phút của Gemini
+            time.sleep(30) 
         except Exception as e:
             logger.error(f"❌ Lỗi Gemini batch {i//batch_size + 1}: {e}")
             summary += "Lỗi Gemini trong batch này.\n\n"
@@ -146,56 +173,90 @@ def create_pdf(summary_text, articles):
         story.append(Spacer(1, 6))
     story.append(Spacer(1, 12))
     story.append(Paragraph("<b>II. DANH SÁCH TIN THAM KHẢO:</b>", styleVN))
-    for a in articles:
+    
+    unique_articles = list({a['title']: a for a in articles}.values())
+    for a in unique_articles:
         story.append(Paragraph(f"- <a href='{a['url']}'>{a['title']}</a> ({a['source']})", styleVN))
         story.append(Spacer(1, 6))
     doc.build(story)
     return filename
 
-# ========== 7️⃣ GỬI EMAIL (SendGrid) ==========
+# ========== 7️⃣ GỬI EMAIL (SMTP - Thay thế SendGrid) ==========
 def send_email(subject, body, attachment_path):
+    if not all([SMTP_SERVER, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD]):
+        logger.error("❌ Lỗi: Thiếu cấu hình SMTP (Server/Port/Username/Password)!")
+        return
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            sg = SendGridAPIClient(SENDGRID_API_KEY)
+            # 1. Tạo đối tượng email MIME
+            msg = MIMEMultipart()
+            msg['From'] = EMAIL_SENDER
+            msg['To'] = EMAIL_RECEIVER
+            msg['Subject'] = subject
+            # Nội dung email (dùng utf-8 cho tiếng Việt)
+            msg.attach(MIMEText(body, 'plain', 'utf-8'))
+            
+            # 2. Thêm file đính kèm PDF
             with open(attachment_path, "rb") as f:
-                pdf_data = f.read()
-            from_email = Email(EMAIL_SENDER)
-            to_email = Email(EMAIL_RECEIVER)
-            content = Content("text/plain", body)
-            mail = Mail(from_email, subject, to_email, content)
-            attachment = Attachment(
-                FileContent(pdf_data),
-                FileName(os.path.basename(attachment_path)),
-                FileType("application/pdf"),
-                Disposition("attachment")
+                part = MIMEBase('application', 'octet-stream')
+                part.set_payload(f.read())
+            
+            encoders.encode_base64(part)
+            part.add_header(
+                'Content-Disposition',
+                f"attachment; filename= {os.path.basename(attachment_path)}",
             )
-            mail.attachment = attachment
-            response = sg.client.mail.send.post(request_body=mail.get())
-            if response.status_code == 202:
-                logger.info("✅ Email đã được gửi thành công!")
-                return
+            msg.attach(part)
+
+            # 3. Kết nối và gửi qua SMTP
+            logger.info(f"⏳ Đang kết nối SMTP tới {SMTP_SERVER}:{SMTP_PORT}...")
+            
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                server.starttls() 
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
+            
+            logger.info("✅ Email đã được gửi thành công qua SMTP!")
+            return
+            
         except Exception as e:
-            logger.error(f"❌ Lỗi email (lần {attempt + 1}): {e}")
+            logger.error(f"❌ Lỗi email SMTP (lần {attempt + 1}): {e}")
             if attempt < max_retries - 1:
-                time.sleep(15)  # Tăng delay lên 15s để chờ mạng Render
+                time.sleep(15)
+            else:
+                logger.error("❌ Gửi email thất bại sau tất cả lần thử.")
 
 # ========== 8️⃣ CHẠY BÁO CÁO ==========
 def run_report():
     logger.info(f"🕒 Bắt đầu tạo báo cáo: {datetime.datetime.now()}")
+    pdf_file = None
     try:
         articles = get_news(KEYWORDS)
-        logger.info(f"📄 Thu được {len(articles)} bài viết.")
-        summary = summarize_with_gemini(GEMINI_API_KEY, articles)
-        pdf_file = create_pdf(summary, articles)
-        send_email(
-            "[BÁO CÁO KINH TẾ TOÀN CẦU & VIỆT NAM]",
-            "Đính kèm là báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam mới nhất (AI tổng hợp).",
-            pdf_file
-        )
+        
+        if articles:
+            logger.info(f"📄 Thu được {len(articles)} bài viết.")
+            summary = summarize_with_gemini(GEMINI_API_KEY, articles)
+            pdf_file = create_pdf(summary, articles)
+            send_email(
+                f"[BÁO CÁO KINH TẾ] {datetime.date.today()}",
+                "Đính kèm là báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam mới nhất (AI tổng hợp).",
+                pdf_file
+            )
+        else:
+            logger.info("ℹ️ Không có bài viết mới để tạo báo cáo. Bỏ qua gửi email.")
+            
         logger.info("🎯 Hoàn tất báo cáo!")
+        
     except Exception as e:
         logger.error(f"❌ Lỗi tổng thể: {e}")
+    finally:
+        # Dọn dẹp file PDF 
+        if pdf_file and os.path.exists(pdf_file):
+            os.remove(pdf_file)
+            logger.info(f"🗑️ Đã xóa file tạm: {pdf_file}")
+
 
 # ========== 9️⃣ LỊCH TRÌNH (08:00 và 23:00 UTC+7) ==========
 schedule.every().day.at("01:00").do(run_report)  # 08:00 sáng (UTC+7 = UTC 01:00)
