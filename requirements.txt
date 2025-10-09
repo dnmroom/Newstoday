@@ -3,4 +3,3 @@ google-generativeai
 reportlab
 schedule
 Flask
-python-sendgrid
