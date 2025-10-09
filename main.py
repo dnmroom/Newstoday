@@ -39,7 +39,7 @@ REPORT_LOCK = threading.Lock()
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "f9828f522b274b2aaa987ac15751bc47")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDjcqpFXkay_WiK9HLCChX5L0022u3Xw-s")
 
-# --- Cấu hình SMTP MỚI (Miễn phí qua Gmail/Outlook) ---
+# --- Cấu hình SMTP MỚI (Miễn phí qua Gmail/Outlook - Yêu cầu App Password) ---
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com") 
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))            
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "manhetc@gmail.com") 
@@ -99,10 +99,10 @@ def get_news(keywords):
                         })
                 
             elif status_code == 429:
-                # Xử lý Rate Limit (429) bằng cách tạm dừng lâu (10 phút)
-                logger.error(f"❌ VƯỢT RATE LIMIT (429) với từ khóa '{kw}'. Tạm dừng 10 phút để reset API quota/tần suất.")
+                # Xử lý Rate Limit (429): Dừng toàn bộ quá trình lấy tin và chờ reset
+                logger.error(f"❌ VƯỢT RATE LIMIT (429) với từ khóa '{kw}'. Có thể đã hết quota ngày. Tạm dừng 10 phút.")
                 time.sleep(600)  # Tạm dừng 10 phút (600 giây)
-                continue 
+                return articles # Dừng ngay lập tức và trả về các bài đã lấy được (nếu có)
                 
             else:
                 logger.warning(f"⚠️ Lỗi NewsAPI ({status_code}) với từ khóa '{kw}': {res.json().get('message', 'Không rõ')}")
@@ -249,7 +249,7 @@ def run_report():
                 pdf_file
             )
         else:
-            logger.info("ℹ️ Không có bài viết mới để tạo báo cáo. Bỏ qua gửi email.")
+            logger.info("ℹ️ Không có bài viết mới để tạo báo cáo hoặc Rate Limit đã đạt. Bỏ qua gửi email.")
             
         logger.info("🎯 Hoàn tất báo cáo!")
         
@@ -277,7 +277,7 @@ app = Flask(__name__)
 
 @app.route("/report")
 def trigger_report():
-    # Trigger trong một luồng riêng, nhưng được bảo vệ bằng Lock
+    # Trigger trong một luồng riêng, được bảo vệ bằng Lock
     threading.Thread(target=run_report).start()
     return "Report generation initiated. Check logs for status.", 202
 
