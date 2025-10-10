@@ -1,13 +1,11 @@
 # =================================================================================
-# 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM (v2.0)
+# 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM (v2.2)
 # Tác giả: Gemini (Phân tích & Nâng cấp)
 #
-# CẢI TIẾN CHÍNH:
-# - [FIX] Sửa lỗi nghiêm trọng khi mã hóa file đính kèm Base64.
-# - [SECURITY] Yêu cầu tất cả API Keys phải được set qua biến môi trường.
-# - [PRODUCTION] Sử dụng WSGI server (waitress) thay cho server dev của Flask.
-# - [ROBUSTNESS] Thêm User-Agent vào requests, cải tiến Gemini prompt.
-# - [QOL] Thêm endpoint favicon để làm sạch log.
+# PHIÊN BẢN SỬA LỖI:
+# - [FIX] Sửa lỗi `AttributeError` ở trang chủ khi hiển thị lịch trình.
+# - [FIX] Viết lại logic xử lý Markdown-to-HTML trong hàm tạo PDF để tránh lỗi
+#   `ValueError: Parse error`, đảm bảo thẻ HTML luôn hợp lệ.
 # =================================================================================
 
 import os
@@ -17,9 +15,10 @@ import time
 import schedule
 import threading
 import logging
-import base64  # [FIX] Import module base64
+import base64
+import re # Thêm thư viện regex để xử lý văn bản tốt hơn
 from flask import Flask, Response
-from waitress import serve # [PRODUCTION] Import waitress
+from waitress import serve
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -35,7 +34,6 @@ logger = logging.getLogger(__name__)
 REPORT_LOCK = threading.Lock()
 
 # ========== 1️⃣ CẤU HÌNH (TỪ BIẾN MÔI TRƯỜNG) ==========
-# [SECURITY] Bắt buộc phải set các biến này trên Render/môi trường của bạn
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
@@ -43,13 +41,11 @@ EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 PORT = int(os.getenv("PORT", 10000))
 
-# Kiểm tra các biến môi trường quan trọng khi khởi động
 if not all([NEWSAPI_KEY, GEMINI_API_KEY, RESEND_API_KEY, EMAIL_SENDER, EMAIL_RECEIVER]):
     logger.error("❌ LỖI KHỞI ĐỘNG: Vui lòng thiết lập đầy đủ các biến môi trường: NEWSAPI_KEY, GEMINI_API_KEY, RESEND_API_KEY, EMAIL_SENDER, EMAIL_RECEIVER.")
-    exit(1) # Dừng ứng dụng nếu thiếu cấu hình
+    exit(1)
 
 RESEND_API_URL = "https://api.resend.com/emails"
-# [ROBUSTNESS] Thêm User-Agent để giả lập trình duyệt
 HTTP_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
@@ -102,16 +98,15 @@ def get_news(keywords):
                         })
             elif res.status_code == 429:
                 logger.error(f"❌ VƯỢT RATE LIMIT (429) với từ khóa '{kw}'. Dừng lấy tin.")
-                return articles # Dừng ngay và trả về những gì đã có
+                return articles
             else:
                 logger.warning(f"⚠️ Lỗi NewsAPI ({res.status_code}) với từ khóa '{kw}': {res.text}")
             
-            time.sleep(2) # Delay ngắn giữa các request
+            time.sleep(2)
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ Lỗi kết nối NewsAPI: {e}")
             time.sleep(5)
             
-    # Lọc trùng sau khi lấy tin
     unique_articles = list({a['url']: a for a in articles}.values())
     logger.info(f"Thu được {len(unique_articles)} bài viết duy nhất.")
     return unique_articles
@@ -128,7 +123,6 @@ def summarize_with_gemini(api_key, articles):
     for i in range(0, len(articles), batch_size):
         batch_articles = articles[i:i + batch_size]
         titles = "\n".join([f"- {a['title']} (Nguồn: {a['source']})" for a in batch_articles])
-        # [IMPROVEMENT] Prompt được cải tiến để có cấu trúc Markdown rõ ràng
         prompt = f"""
         Bạn là một chuyên gia phân tích kinh tế vĩ mô hàng đầu. Hãy phân tích danh sách các tiêu đề tin tức sau và trình bày kết quả bằng tiếng Việt theo định dạng Markdown chặt chẽ như sau:
 
@@ -153,7 +147,7 @@ def summarize_with_gemini(api_key, articles):
             response = model.generate_content(prompt)
             summary += response.text.strip() + "\n\n"
             logger.info(f"✅ Hoàn thành batch {i//batch_size + 1} với {len(batch_articles)} bài.")
-            time.sleep(20) # Giảm delay để chạy nhanh hơn
+            time.sleep(20)
         except Exception as e:
             logger.error(f"❌ Lỗi Gemini batch {i//batch_size + 1}: {e}")
             summary += f"### Lỗi Phân Tích Batch {i//batch_size + 1}\n- Đã xảy ra lỗi khi kết nối với Gemini.\n\n"
@@ -161,7 +155,7 @@ def summarize_with_gemini(api_key, articles):
 
 # ========== 6️⃣ TẠO PDF ==========
 def create_pdf(summary_text, articles):
-    filename = f"/tmp/Bao_cao_Kinh_te_{datetime.date.today()}.pdf" # Ghi vào /tmp
+    filename = f"/tmp/Bao_cao_Kinh_te_{datetime.date.today()}.pdf"
     doc = SimpleDocTemplate(filename, pagesize=A4)
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name='VN_Body', fontName=FONT_NAME, fontSize=11, leading=14))
@@ -173,13 +167,28 @@ def create_pdf(summary_text, articles):
     story.append(Spacer(1, 20))
     story.append(Paragraph("<b>I. TỔNG HỢP & PHÂN TÍCH TỪ GEMINI</b>", styles['VN_Header']))
     
-    # Xử lý văn bản Markdown từ Gemini để hiển thị đẹp trong PDF
-    cleaned_summary = summary_text.replace("###", "<b>").replace("**", "<b>").replace(":**", ":</b>")
-    for para in cleaned_summary.split("\n"):
-        if para.startswith("<b>"):
-            para = para + "</b>"
-        story.append(Paragraph(para, styles['VN_Body']))
-    
+    # [FIX] Logic xử lý Markdown-to-HTML mới, an toàn và mạnh mẽ hơn
+    for line in summary_text.split('\n'):
+        if not line.strip():
+            continue
+        
+        # Xử lý các dòng tiêu đề (###)
+        line = line.replace('### ', '<b>').replace('###', '<b>')
+        if line.startswith('<b>'):
+             line += '</b>'
+
+        # Xử lý các dòng in đậm (**) bằng regex để đảm bảo các thẻ được đóng mở đúng
+        # Ví dụ: **Vàng:** -> <b>Vàng:</b>
+        line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
+
+        try:
+            story.append(Paragraph(line, styles['VN_Body']))
+        except Exception as e:
+            logger.error(f"Lỗi khi thêm dòng vào PDF: '{line}'. Lỗi: {e}")
+            # Thêm phiên bản đã được làm sạch để tránh làm hỏng toàn bộ file PDF
+            cleaned_line = re.sub(r'<[^>]*>', '', line) # Xóa tất cả thẻ HTML
+            story.append(Paragraph(cleaned_line, styles['VN_Body']))
+
     story.append(Spacer(1, 20))
     story.append(Paragraph("<b>II. DANH SÁCH TIN BÀI THAM KHẢO</b>", styles['VN_Header']))
     
@@ -198,12 +207,11 @@ def send_email(subject, body, attachment_path):
     for attempt in range(max_retries):
         try:
             with open(attachment_path, "rb") as f:
-                # [FIX] Sử dụng module `base64` để mã hóa chính xác
                 pdf_data_base64 = base64.b64encode(f.read()).decode("utf-8")
 
             data = {
                 "from": EMAIL_SENDER,
-                "to": EMAIL_RECEIVER.split(','), # Hỗ trợ gửi nhiều email
+                "to": EMAIL_RECEIVER.split(','),
                 "subject": subject,
                 "html": body.replace('\n', '<br>'),
                 "attachments": [{
@@ -269,8 +277,8 @@ def run_report():
         REPORT_LOCK.release()
 
 # ========== 9️⃣ LỊCH TRÌNH (08:00 và 23:00 UTC+7) ==========
-schedule.every().day.at("01:00").do(run_report) # 08:00 sáng (UTC+7 = UTC 01:00)
-schedule.every().day.at("16:00").do(run_report) # 23:00 tối (UTC+7 = UTC 16:00)
+schedule.every().day.at("01:00").do(run_report)
+schedule.every().day.at("16:00").do(run_report)
 
 def schedule_runner():
     logger.info("🚀 [SCHEDULER] Đã khởi động. Chờ đến lịch chạy...")
@@ -283,13 +291,24 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    next_run_time_utc = schedule.next_run.strftime('%Y-%m-%d %H:%M:%S') if schedule.next_run else "N/A"
+    # [FIX] Hiển thị danh sách các job một cách an toàn để tránh lỗi AttributeError
+    try:
+        jobs_info = "<br>".join([str(job) for job in schedule.get_jobs()])
+        if not jobs_info:
+            jobs_info = "Chưa có lịch trình nào được thiết lập."
+    except Exception:
+        jobs_info = "Không thể lấy thông tin lịch trình."
+
     return f"""
     <html>
         <body style='font-family: sans-serif; text-align: center; padding-top: 50px;'>
             <h2>🤖 Dịch Vụ Báo Cáo Kinh Tế AI đang hoạt động</h2>
-            <p>Lần chạy tự động tiếp theo (giờ UTC): <strong>{next_run_time_utc}</strong></p>
-            <p><a href='/report' target='_blank'>Chạy báo cáo thủ công</a> (sẽ không hoạt động nếu đang có báo cáo khác chạy)</p>
+            <p><strong>Lịch trình đã thiết lập (giờ UTC):</strong></p>
+            <div style='background-color: #f0f0f0; padding: 10px; border-radius: 5px; display: inline-block;'>
+                <code>{jobs_info}</code>
+            </div>
+            <p style='margin-top: 20px;'><a href='/report' target='_blank'>Chạy báo cáo thủ công</a></p>
+            <p><small>(Sẽ không có tác dụng nếu đang có báo cáo khác chạy)</small></p>
         </body>
     </html>
     """, 200
@@ -305,7 +324,6 @@ def health_check():
 
 @app.route('/favicon.ico')
 def favicon():
-    # [QOL] Trả về 204 No Content để tránh lỗi 404 trong log
     return Response(status=204)
 
 if __name__ == "__main__":
@@ -313,5 +331,5 @@ if __name__ == "__main__":
     scheduler_thread.start()
     
     logger.info(f"🌐 Khởi động server trên cổng {PORT}...")
-    # [PRODUCTION] Sử dụng waitress để chạy ứng dụng
     serve(app, host='0.0.0.0', port=PORT)
+
