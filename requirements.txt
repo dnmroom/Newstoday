@@ -1,5 +1,6 @@
 requests
-google-generativeai
-reportlab
 schedule
-Flask
+flask
+waitress
+reportlab
+google-generativeai
