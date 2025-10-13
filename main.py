@@ -1,11 +1,11 @@
 # =================================================================================
-# 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM (v3.3)
+# 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM (v3.4)
 # Tác giả: Gemini (Phân tích & Hoàn thiện)
 #
-# PHIÊN BẢN HOÀN CHỈNH:
-# - [FIX] Chuyển sang sử dụng giao thức SMTP_SSL trên cổng 465. Đây là phương
-#   thức kết nối trực tiếp và đáng tin cậy hơn, giúp giải quyết các vấn đề
-#   tiềm ẩn về mạng trên các nền tảng đám mây.
+# PHIÊN BẢN THỬ NGHIỆM:
+# - [TEST MODE] Tạm thời bỏ qua việc gọi NewsAPI và sử dụng dữ liệu giả (mock data)
+#   để tập trung vào việc kiểm tra chức năng gửi email mà không bị chặn bởi
+#   rate limit.
 # =================================================================================
 
 import os
@@ -71,32 +71,17 @@ except Exception as e:
 KEYWORDS = ["global economy", "Vietnam economy", "stock market", "real estate", "gold price", "silver price", "monetary policy", "interest rate", "US dollar", "inflation", "FDI Vietnam", "export growth", "manufacturing PMI", "AI economy", "tech industry", "cryptocurrency", "infrastructure Vietnam", "trade agreements", "supply chain", "recession"]
 
 
-# ========== 4️⃣ LẤY TIN TỪ NEWSAPI (KHÔI PHỤC ĐẦY ĐỦ KEYWORD) ==========
+# ========== 4️⃣ LẤY TIN TỪ NEWSAPI (ĐÃ TẠM THỜI VÔ HIỆU HÓA) ==========
 def get_news(keywords):
-    articles = []
-    logger.info(f"🔄 Đang lấy tin từ NewsAPI với {len(keywords)} từ khóa...")
-    # [FINAL] Lặp qua toàn bộ danh sách keywords để báo cáo đầy đủ nhất
-    for kw in keywords:
-        url = f"https://newsapi.org/v2/everything?q={kw}&language=en&pageSize=2&apiKey={NEWSAPI_KEY}"
-        try:
-            res = requests.get(url, timeout=10, headers=HTTP_HEADERS)
-            if res.status_code == 200:
-                for a in res.json().get("articles", []):
-                    if a.get("title") and a.get("url"):
-                        articles.append({"title": a["title"], "url": a["url"], "source": a.get("source", {}).get("name", "Unknown"), "published": a.get("publishedAt"), "keyword": kw})
-            elif res.status_code == 429:
-                logger.error(f"❌ VƯỢT RATE LIMIT (429) với từ khóa '{kw}'. Dừng lấy tin.")
-                return articles # Trả về những gì đã lấy được
-            else:
-                logger.warning(f"⚠️ Lỗi NewsAPI ({res.status_code}) với từ khóa '{kw}': {res.text}")
-            time.sleep(1) # Delay nhỏ giữa các request
-        except requests.exceptions.RequestException as e:
-            logger.error(f"❌ Lỗi kết nối NewsAPI: {e}")
-            time.sleep(5)
-            
-    unique_articles = list({a['url']: a for a in articles}.values())
-    logger.info(f"Thu được {len(unique_articles)} bài viết duy nhất.")
-    return unique_articles
+    # [TEST MODE] Bỏ qua việc gọi API thật và trả về dữ liệu giả để test
+    logger.warning("⚠️ Đang ở chế độ TEST MODE. Sử dụng dữ liệu giả thay vì gọi NewsAPI.")
+    mock_articles = [
+        {'title': '[TEST] Federal Reserve considers new interest rate hike', 'url': 'https://example.com/test1', 'source': 'Test News Agency', 'published': '2025-10-13T08:00:00Z', 'keyword': 'interest rate'},
+        {'title': '[TEST] Vietnam sees record FDI in technology sector', 'url': 'https://example.com/test2', 'source': 'Vietnam Test News', 'published': '2025-10-13T08:05:00Z', 'keyword': 'FDI Vietnam'},
+        {'title': '[TEST] Global supply chain disruptions continue to affect manufacturing', 'url': 'https://example.com/test3', 'source': 'Global Test Times', 'published': '2025-10-13T08:10:00Z', 'keyword': 'supply chain'}
+    ]
+    logger.info(f"Thu được {len(mock_articles)} bài viết giả để thử nghiệm.")
+    return mock_articles
 
 # (Các hàm còn lại từ 5 đến 10 giữ nguyên, không thay đổi)
 # ========== 5️⃣ PHÂN TÍCH GEMINI ==========
@@ -200,7 +185,7 @@ def run_report():
             logger.info(f"🤖 Bắt đầu phân tích {len(articles)} bài viết bằng Gemini...")
             summary = summarize_with_gemini(GEMINI_API_KEY, articles)
             pdf_file = create_pdf(summary, articles)
-            send_email(f"Báo Cáo Kinh Tế AI - {datetime.date.today()}", "Đính kèm là báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam mới nhất (do AI tổng hợp).", pdf_file)
+            send_email(f"[TEST] Báo Cáo Kinh Tế AI - {datetime.date.today()}", "Đây là email thử nghiệm để kiểm tra chức năng gửi mail.", pdf_file)
         else:
             logger.info("ℹ️ Không có bài viết mới hoặc đã gặp lỗi khi lấy tin. Bỏ qua việc tạo báo cáo.")
         logger.info("============ 🎯 HOÀN TẤT TÁC VỤ BÁO CÁO 🎯 ============")
