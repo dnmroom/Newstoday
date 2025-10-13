@@ -1,11 +1,11 @@
 # =================================================================================
-# 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM (v3.4)
+# 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM (v3.6)
 # Tác giả: Gemini (Phân tích & Hoàn thiện)
 #
-# PHIÊN BẢN THỬ NGHIỆM:
-# - [TEST MODE] Tạm thời bỏ qua việc gọi NewsAPI và sử dụng dữ liệu giả (mock data)
-#   để tập trung vào việc kiểm tra chức năng gửi email mà không bị chặn bởi
-#   rate limit.
+# PHIÊN BẢN CUỐI CÙNG:
+# - [FINAL] Chuyển sang giải pháp đơn giản nhất: FormSubmit.co.
+#   Đây là giải pháp triệt để cho vấn đề Render chặn cổng SMTP mà không cần
+#   đăng ký hay cài đặt phức tạp.
 # =================================================================================
 
 import os
@@ -24,10 +24,6 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import google.generativeai as genai
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
 
 # ========== LOGGING ==========
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -39,18 +35,16 @@ REPORT_LOCK = threading.Lock()
 # ========== 1️⃣ CẤU HÌNH (TỪ BIẾN MÔI TRƯỜNG) ==========
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+FORMSUBMIT_EMAIL = os.getenv("FORMSUBMIT_EMAIL") # MỚI: Chỉ cần email của bạn
 PORT = int(os.getenv("PORT", 10000))
 
-if not all([NEWSAPI_KEY, GEMINI_API_KEY, EMAIL_SENDER, GMAIL_APP_PASSWORD, EMAIL_RECEIVER]):
+if not all([NEWSAPI_KEY, GEMINI_API_KEY, FORMSUBMIT_EMAIL]):
     logger.error("❌ LỖI KHỞI ĐỘNG: Vui lòng thiết lập đầy đủ các biến môi trường.")
     exit(1)
 
 HTTP_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 
-# (Hàm 2 và 3 giữ nguyên)
+# (Hàm 2, 3 giữ nguyên)
 # ========== 2️⃣ FONT ==========
 FONT_PATH_NOTO = "/tmp/NotoSans-Regular.ttf"
 FONT_NAME = "Helvetica"
@@ -71,19 +65,32 @@ except Exception as e:
 KEYWORDS = ["global economy", "Vietnam economy", "stock market", "real estate", "gold price", "silver price", "monetary policy", "interest rate", "US dollar", "inflation", "FDI Vietnam", "export growth", "manufacturing PMI", "AI economy", "tech industry", "cryptocurrency", "infrastructure Vietnam", "trade agreements", "supply chain", "recession"]
 
 
-# ========== 4️⃣ LẤY TIN TỪ NEWSAPI (ĐÃ TẠM THỜI VÔ HIỆU HÓA) ==========
+# ========== 4️⃣ LẤY TIN TỪ NEWSAPI (KHÔI PHỤC LẤY TIN THẬT) ==========
 def get_news(keywords):
-    # [TEST MODE] Bỏ qua việc gọi API thật và trả về dữ liệu giả để test
-    logger.warning("⚠️ Đang ở chế độ TEST MODE. Sử dụng dữ liệu giả thay vì gọi NewsAPI.")
-    mock_articles = [
-        {'title': '[TEST] Federal Reserve considers new interest rate hike', 'url': 'https://example.com/test1', 'source': 'Test News Agency', 'published': '2025-10-13T08:00:00Z', 'keyword': 'interest rate'},
-        {'title': '[TEST] Vietnam sees record FDI in technology sector', 'url': 'https://example.com/test2', 'source': 'Vietnam Test News', 'published': '2025-10-13T08:05:00Z', 'keyword': 'FDI Vietnam'},
-        {'title': '[TEST] Global supply chain disruptions continue to affect manufacturing', 'url': 'https://example.com/test3', 'source': 'Global Test Times', 'published': '2025-10-13T08:10:00Z', 'keyword': 'supply chain'}
-    ]
-    logger.info(f"Thu được {len(mock_articles)} bài viết giả để thử nghiệm.")
-    return mock_articles
+    articles = []
+    logger.info(f"🔄 Đang lấy tin từ NewsAPI với {len(keywords)} từ khóa...")
+    for kw in keywords:
+        url = f"https://newsapi.org/v2/everything?q={kw}&language=en&pageSize=2&apiKey={NEWSAPI_KEY}"
+        try:
+            res = requests.get(url, timeout=10, headers=HTTP_HEADERS)
+            if res.status_code == 200:
+                for a in res.json().get("articles", []):
+                    if a.get("title") and a.get("url"):
+                        articles.append({"title": a["title"], "url": a["url"], "source": a.get("source", {}).get("name", "Unknown"), "published": a.get("publishedAt"), "keyword": kw})
+            elif res.status_code == 429:
+                logger.error(f"❌ VƯỢT RATE LIMIT (429) với từ khóa '{kw}'. Dừng lấy tin.")
+                return articles
+            else:
+                logger.warning(f"⚠️ Lỗi NewsAPI ({res.status_code}) với từ khóa '{kw}': {res.text}")
+            time.sleep(1)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Lỗi kết nối NewsAPI: {e}")
+            time.sleep(5)
+    unique_articles = list({a['url']: a for a in articles}.values())
+    logger.info(f"Thu được {len(unique_articles)} bài viết duy nhất.")
+    return unique_articles
 
-# (Các hàm còn lại từ 5 đến 10 giữ nguyên, không thay đổi)
+# (Hàm 5, 6 giữ nguyên)
 # ========== 5️⃣ PHÂN TÍCH GEMINI ==========
 def summarize_with_gemini(api_key, articles):
     if not articles: return "Không có bài viết mới để phân tích."
@@ -133,44 +140,38 @@ def create_pdf(summary_text, articles):
     logger.info(f"📄 Đã tạo file PDF thành công: {filename}")
     return filename
 
-# ========== 7️⃣ GỬI EMAIL (SỬ DỤNG SMTP_SSL - Cổng 465) ==========
-def send_email(subject, body, attachment_path):
-    msg = MIMEMultipart()
-    msg['From'] = EMAIL_SENDER
-    msg['To'] = EMAIL_RECEIVER
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain'))
 
+# ========== 7️⃣ GỬI EMAIL (QUA FORMSUBMIT) ==========
+def send_email_via_formsubmit(subject, body, attachment_path):
+    formsubmit_url = f"https://formsubmit.co/{FORMSUBMIT_EMAIL}"
+    logger.info(f" Gửi email qua FormSubmit tới {formsubmit_url}...")
     try:
         with open(attachment_path, "rb") as f:
-            part = MIMEApplication(f.read(), Name=os.path.basename(attachment_path))
-        part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment_path)}"'
-        msg.attach(part)
-    except Exception as e:
-        logger.error(f"❌ Lỗi khi đính kèm file PDF: {e}")
-        return False
+            pdf_data = f.read()
 
-    server = None
-    try:
-        # [FIX] Chuyển sang SMTP_SSL trên cổng 465 để kết nối ổn định hơn
-        logger.info("Bước 1/3: Đang tạo kết nối SSL tới smtp.gmail.com:465...")
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        logger.info("Bước 2/3: Kết nối SSL thành công. Đang đăng nhập...")
-        server.login(EMAIL_SENDER, GMAIL_APP_PASSWORD)
-        logger.info("Bước 3/3: Đăng nhập thành công. Đang gửi email...")
-        server.send_message(msg)
-        logger.info("✅ Email đã được gửi thành công qua Gmail (SMTP_SSL)!")
-        return True
-    except smtplib.SMTPAuthenticationError:
-        logger.error("❌ LỖI XÁC THỰC SMTP: Đăng nhập thất bại. Vui lòng kiểm tra lại EMAIL_SENDER và GMAIL_APP_PASSWORD.")
-        return False
+        payload = {
+            '_subject': subject,
+            'message': body,
+        }
+        
+        files = {
+            'attachment': (os.path.basename(attachment_path), pdf_data, 'application/pdf')
+        }
+
+        response = requests.post(formsubmit_url, data=payload, files=files, timeout=30)
+        
+        # FormSubmit thường redirect sau khi thành công, nên mã 3xx cũng là thành công
+        if 200 <= response.status_code < 400:
+            logger.info("✅ Yêu cầu gửi email đã được FormSubmit chấp nhận thành công!")
+            logger.info("LƯU Ý: Nếu đây là lần đầu tiên, hãy kiểm tra email và nhấn link kích hoạt từ FormSubmit.")
+            return True
+        else:
+            logger.error(f"❌ FormSubmit trả về lỗi {response.status_code}: {response.text}")
+            return False
+            
     except Exception as e:
-        logger.error(f"❌ Lỗi không xác định khi gửi email: {e}")
+        logger.error(f"❌ Lỗi không xác định khi gọi FormSubmit: {e}")
         return False
-    finally:
-        if server:
-            server.quit()
-            logger.info("Đã đóng kết nối với máy chủ SMTP.")
 
 # ========== 8️⃣ CHẠY BÁO CÁO ==========
 def run_report():
@@ -185,7 +186,11 @@ def run_report():
             logger.info(f"🤖 Bắt đầu phân tích {len(articles)} bài viết bằng Gemini...")
             summary = summarize_with_gemini(GEMINI_API_KEY, articles)
             pdf_file = create_pdf(summary, articles)
-            send_email(f"[TEST] Báo Cáo Kinh Tế AI - {datetime.date.today()}", "Đây là email thử nghiệm để kiểm tra chức năng gửi mail.", pdf_file)
+            send_email_via_formsubmit(
+                f"Báo Cáo Kinh Tế AI - {datetime.date.today()}",
+                "Đính kèm là báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam mới nhất.",
+                pdf_file
+            )
         else:
             logger.info("ℹ️ Không có bài viết mới hoặc đã gặp lỗi khi lấy tin. Bỏ qua việc tạo báo cáo.")
         logger.info("============ 🎯 HOÀN TẤT TÁC VỤ BÁO CÁO 🎯 ============")
@@ -197,6 +202,7 @@ def run_report():
             logger.info(f"🗑️ Đã xóa file tạm: {pdf_file}")
         REPORT_LOCK.release()
 
+# (Hàm 9, 10 giữ nguyên)
 # ========== 9️⃣ LỊCH TRÌNH ==========
 schedule.every().day.at("01:00").do(run_report)
 schedule.every().day.at("16:00").do(run_report)
