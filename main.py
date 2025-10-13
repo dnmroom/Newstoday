@@ -1,11 +1,11 @@
 # =================================================================================
-# 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM (v3.6)
+# 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM (v3.8)
 # Tác giả: Gemini (Phân tích & Hoàn thiện)
 #
-# PHIÊN BẢN CUỐI CÙNG:
-# - [FINAL] Chuyển sang giải pháp đơn giản nhất: FormSubmit.co.
-#   Đây là giải pháp triệt để cho vấn đề Render chặn cổng SMTP mà không cần
-#   đăng ký hay cài đặt phức tạp.
+# PHIÊN BẢN HOÀN CHỈNH CUỐI CÙNG:
+# - Sử dụng giải pháp FormSubmit.co để gửi email, hoạt động ổn định trên Render.
+# - Dọn dẹp code, loại bỏ endpoint kích hoạt không cần thiết.
+# - Hệ thống hoàn toàn tự động và sẵn sàng để hoạt động lâu dài.
 # =================================================================================
 
 import os
@@ -35,7 +35,7 @@ REPORT_LOCK = threading.Lock()
 # ========== 1️⃣ CẤU HÌNH (TỪ BIẾN MÔI TRƯỜNG) ==========
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-FORMSUBMIT_EMAIL = os.getenv("FORMSUBMIT_EMAIL") # MỚI: Chỉ cần email của bạn
+FORMSUBMIT_EMAIL = os.getenv("FORMSUBMIT_EMAIL")
 PORT = int(os.getenv("PORT", 10000))
 
 if not all([NEWSAPI_KEY, GEMINI_API_KEY, FORMSUBMIT_EMAIL]):
@@ -44,7 +44,7 @@ if not all([NEWSAPI_KEY, GEMINI_API_KEY, FORMSUBMIT_EMAIL]):
 
 HTTP_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 
-# (Hàm 2, 3 giữ nguyên)
+# (Các hàm 2, 3, 4, 5, 6 giữ nguyên)
 # ========== 2️⃣ FONT ==========
 FONT_PATH_NOTO = "/tmp/NotoSans-Regular.ttf"
 FONT_NAME = "Helvetica"
@@ -64,8 +64,7 @@ except Exception as e:
 # ========== 3️⃣ TỪ KHÓA ==========
 KEYWORDS = ["global economy", "Vietnam economy", "stock market", "real estate", "gold price", "silver price", "monetary policy", "interest rate", "US dollar", "inflation", "FDI Vietnam", "export growth", "manufacturing PMI", "AI economy", "tech industry", "cryptocurrency", "infrastructure Vietnam", "trade agreements", "supply chain", "recession"]
 
-
-# ========== 4️⃣ LẤY TIN TỪ NEWSAPI (KHÔI PHỤC LẤY TIN THẬT) ==========
+# ========== 4️⃣ LẤY TIN TỪ NEWSAPI ==========
 def get_news(keywords):
     articles = []
     logger.info(f"🔄 Đang lấy tin từ NewsAPI với {len(keywords)} từ khóa...")
@@ -90,7 +89,6 @@ def get_news(keywords):
     logger.info(f"Thu được {len(unique_articles)} bài viết duy nhất.")
     return unique_articles
 
-# (Hàm 5, 6 giữ nguyên)
 # ========== 5️⃣ PHÂN TÍCH GEMINI ==========
 def summarize_with_gemini(api_key, articles):
     if not articles: return "Không có bài viết mới để phân tích."
@@ -140,7 +138,6 @@ def create_pdf(summary_text, articles):
     logger.info(f"📄 Đã tạo file PDF thành công: {filename}")
     return filename
 
-
 # ========== 7️⃣ GỬI EMAIL (QUA FORMSUBMIT) ==========
 def send_email_via_formsubmit(subject, body, attachment_path):
     formsubmit_url = f"https://formsubmit.co/{FORMSUBMIT_EMAIL}"
@@ -148,27 +145,15 @@ def send_email_via_formsubmit(subject, body, attachment_path):
     try:
         with open(attachment_path, "rb") as f:
             pdf_data = f.read()
-
-        payload = {
-            '_subject': subject,
-            'message': body,
-        }
-        
-        files = {
-            'attachment': (os.path.basename(attachment_path), pdf_data, 'application/pdf')
-        }
-
+        payload = {'_subject': subject, 'message': body}
+        files = {'attachment': (os.path.basename(attachment_path), pdf_data, 'application/pdf')}
         response = requests.post(formsubmit_url, data=payload, files=files, timeout=30)
-        
-        # FormSubmit thường redirect sau khi thành công, nên mã 3xx cũng là thành công
         if 200 <= response.status_code < 400:
             logger.info("✅ Yêu cầu gửi email đã được FormSubmit chấp nhận thành công!")
-            logger.info("LƯU Ý: Nếu đây là lần đầu tiên, hãy kiểm tra email và nhấn link kích hoạt từ FormSubmit.")
             return True
         else:
             logger.error(f"❌ FormSubmit trả về lỗi {response.status_code}: {response.text}")
             return False
-            
     except Exception as e:
         logger.error(f"❌ Lỗi không xác định khi gọi FormSubmit: {e}")
         return False
@@ -186,11 +171,7 @@ def run_report():
             logger.info(f"🤖 Bắt đầu phân tích {len(articles)} bài viết bằng Gemini...")
             summary = summarize_with_gemini(GEMINI_API_KEY, articles)
             pdf_file = create_pdf(summary, articles)
-            send_email_via_formsubmit(
-                f"Báo Cáo Kinh Tế AI - {datetime.date.today()}",
-                "Đính kèm là báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam mới nhất.",
-                pdf_file
-            )
+            send_email_via_formsubmit(f"Báo Cáo Kinh Tế AI - {datetime.date.today()}", "Đính kèm là báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam mới nhất.", pdf_file)
         else:
             logger.info("ℹ️ Không có bài viết mới hoặc đã gặp lỗi khi lấy tin. Bỏ qua việc tạo báo cáo.")
         logger.info("============ 🎯 HOÀN TẤT TÁC VỤ BÁO CÁO 🎯 ============")
@@ -202,7 +183,6 @@ def run_report():
             logger.info(f"🗑️ Đã xóa file tạm: {pdf_file}")
         REPORT_LOCK.release()
 
-# (Hàm 9, 10 giữ nguyên)
 # ========== 9️⃣ LỊCH TRÌNH ==========
 schedule.every().day.at("01:00").do(run_report)
 schedule.every().day.at("16:00").do(run_report)
@@ -215,6 +195,7 @@ def schedule_runner():
 
 # ========== 1️⃣0️⃣ SERVER ==========
 app = Flask(__name__)
+
 @app.route("/")
 def index():
     try:
@@ -234,9 +215,12 @@ def health_check(): return "OK", 200
 @app.route('/favicon.ico')
 def favicon(): return Response(status=204)
 
+# Endpoint /activate-formsubmit đã được xóa đi
+
 if __name__ == "__main__":
     scheduler_thread = threading.Thread(target=schedule_runner, daemon=True)
     scheduler_thread.start()
     logger.info(f"🌐 Khởi động server trên cổng {PORT}...")
     serve(app, host='0.0.0.0', port=PORT)
+
 
