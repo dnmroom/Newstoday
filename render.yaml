@@ -10,9 +10,7 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-      - key: EMAIL_SENDER
+      - key: GOOGLE_DRIVE_FOLDER_ID
         sync: false
-      - key: EMAIL_PASSWORD
-        sync: false
-      - key: EMAIL_RECEIVER
+      - key: GOOGLE_CREDENTIALS_JSON
         sync: false
