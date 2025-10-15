@@ -1,20 +1,14 @@
-# =================================================================================
-# 🔧 TỰ ĐỘNG TỔNG HỢP & PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU + VIỆT NAM (v3.8)
-# Tác giả: Gemini (Phân tích & Hoàn thiện)
-# 🔧 AUTO ECONOMIC NEWS SUMMARY & ANALYSIS - GLOBAL + VIETNAM (v4.0)
-# Author: Gemini (Analysis & Refinement)
-#
-# PHIÊN BẢN HOÀN CHỈNH CUỐI CÙNG:
-# - Sử dụng giải pháp FormSubmit.co để gửi email, hoạt động ổn định trên Render.
-# - Dọn dẹp code, loại bỏ endpoint kích hoạt không cần thiết.
-# - Hệ thống hoàn toàn tự động và sẵn sàng để hoạt động lâu dài.
-# FINAL VERSION - GOOGLE DRIVE:
-# - Robust solution: Automatically uploads generated PDF reports to a specified
-#   Google Drive folder instead of sending emails.
-# - Uses a Google Service Account for secure authentication from the server.
-# =================================================================================
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Auto Economic News Summary & Analysis (v4.1)
+- Generate PDF reports from NewsAPI + Gemini
+- Upload generated PDF to Google Drive using a Service Account
+- Flask + Waitress for hosting on Render
+"""
 
 import os
+import json
 import requests
 import datetime
 import time
@@ -22,7 +16,6 @@ import schedule
 import threading
 import logging
 import re
-import json
 from flask import Flask, Response
 from waitress import serve
 from reportlab.lib.pagesizes import A4
@@ -31,332 +24,349 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import google.generativeai as genai
-# New Google libraries
+
+# Google Drive client libs
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# ========== LOGGING ==========
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# ----------------- Logging -----------------
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+log_path = os.path.join(LOG_DIR, "app.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(log_path, encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
-# Lock
-# Lock to prevent concurrent runs
+# ----------------- Lock -----------------
 REPORT_LOCK = threading.Lock()
 
-# ========== 1️⃣ CẤU HÌNH (TỪ BIẾN MÔI TRƯỜNG) ==========
-# ========== 1️⃣ CONFIGURATION (FROM ENVIRONMENT VARIABLES) ==========
+# ----------------- Config from environment -----------------
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-FORMSUBMIT_EMAIL = os.getenv("FORMSUBMIT_EMAIL")
-GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID") # NEW
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON") # NEW
+GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")  # Should be full JSON string
 PORT = int(os.getenv("PORT", 10000))
 
-if not all([NEWSAPI_KEY, GEMINI_API_KEY, FORMSUBMIT_EMAIL]):
-    logger.error("❌ LỖI KHỞI ĐỘNG: Vui lòng thiết lập đầy đủ các biến môi trường.")
-# Check for essential environment variables
-if not all([NEWSAPI_KEY, GEMINI_API_KEY, GOOGLE_DRIVE_FOLDER_ID, GOOGLE_CREDENTIALS_JSON]):
-    logger.error("❌ STARTUP ERROR: Please set all required environment variables.")
+missing = [k for k, v in {
+    "NEWSAPI_KEY": NEWSAPI_KEY,
+    "GEMINI_API_KEY": GEMINI_API_KEY,
+    "GOOGLE_DRIVE_FOLDER_ID": GOOGLE_DRIVE_FOLDER_ID,
+    "GOOGLE_CREDENTIALS_JSON": GOOGLE_CREDENTIALS_JSON
+}.items() if not v]
+
+if missing:
+    logger.error(f"❌ STARTUP ERROR: Missing environment variables: {', '.join(missing)}")
+    # Exit because Drive upload depends on these
     exit(1)
 
-HTTP_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
 
-# (Các hàm 2, 3, 4, 5, 6 giữ nguyên)
-# ========== 2️⃣ FONT ==========
-# ========== 2️⃣ FONT SETUP ==========
+# ----------------- Fonts -----------------
 FONT_PATH_NOTO = "/tmp/NotoSans-Regular.ttf"
 FONT_NAME = "Helvetica"
 try:
     if not os.path.exists(FONT_PATH_NOTO):
-        logger.info("⏳ Tải font NotoSans...")
         logger.info("⏳ Downloading NotoSans font...")
-        r = requests.get("https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf", stream=True, timeout=30, headers=HTTP_HEADERS)
+        r = requests.get(
+            "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf",
+            stream=True, timeout=30, headers=HTTP_HEADERS
+        )
         r.raise_for_status()
-        with open(FONT_PATH_NOTO, "wb") as f: f.write(r.content)
         with open(FONT_PATH_NOTO, "wb") as f:
-            f.write(r.content)
+            for chunk in r.iter_content(1024):
+                f.write(chunk)
     pdfmetrics.registerFont(TTFont("NotoSans", FONT_PATH_NOTO))
     FONT_NAME = "NotoSans"
     logger.info("✅ Font NotoSans OK!")
-    logger.info("✅ NotoSans font is ready!")
 except Exception as e:
-    logger.warning(f"❌ Lỗi tải font: {e}. Sử dụng Helvetica fallback.")
-    logger.warning(f"❌ Font download failed: {e}. Falling back to Helvetica.")
+    logger.warning(f"❌ Font download/registration failed: {e}. Falling back to Helvetica.")
     FONT_NAME = "Helvetica"
 
-# ========== 3️⃣ TỪ KHÓA ==========
-# ========== 3️⃣ KEYWORDS ==========
-KEYWORDS = ["global economy", "Vietnam economy", "stock market", "real estate", "gold price", "silver price", "monetary policy", "interest rate", "US dollar", "inflation", "FDI Vietnam", "export growth", "manufacturing PMI", "AI economy", "tech industry", "cryptocurrency", "infrastructure Vietnam", "trade agreements", "supply chain", "recession"]
+# ----------------- Keywords -----------------
+KEYWORDS = [
+    "global economy", "Vietnam economy", "stock market", "real estate",
+    "gold price", "silver price", "monetary policy", "interest rate",
+    "US dollar", "inflation", "FDI Vietnam", "export growth",
+    "manufacturing PMI", "AI economy", "tech industry", "cryptocurrency",
+    "infrastructure Vietnam", "trade agreements", "supply chain", "recession"
+]
 
-# ========== 4️⃣ LẤY TIN TỪ NEWSAPI ==========
-# ========== 4️⃣ FETCH NEWS FROM NEWSAPI ==========
+# ----------------- Fetch news -----------------
 def get_news(keywords):
     articles = []
-    logger.info(f"🔄 Đang lấy tin từ NewsAPI với {len(keywords)} từ khóa...")
     logger.info(f"🔄 Fetching news from NewsAPI for {len(keywords)} keywords...")
     for kw in keywords:
-        url = f"https://newsapi.org/v2/everything?q={kw}&language=en&pageSize=2&apiKey={NEWSAPI_KEY}"
+        url = f"https://newsapi.org/v2/everything?q={requests.utils.quote(kw)}&language=en&pageSize=3&apiKey={NEWSAPI_KEY}"
         try:
-            res = requests.get(url, timeout=10, headers=HTTP_HEADERS)
+            res = requests.get(url, timeout=12, headers=HTTP_HEADERS)
             if res.status_code == 200:
                 for a in res.json().get("articles", []):
-                    if a.get("title") and a.get("url"):
-                        articles.append({"title": a["title"], "url": a["url"], "source": a.get("source", {}).get("name", "Unknown"), "published": a.get("publishedAt"), "keyword": kw})
+                    title = a.get("title")
+                    url_a = a.get("url")
+                    if title and url_a:
                         articles.append({
-                            "title": a["title"],
-                            "url": a["url"],
+                            "title": title,
+                            "url": url_a,
                             "source": a.get("source", {}).get("name", "Unknown"),
                             "published": a.get("publishedAt"),
                             "keyword": kw
                         })
             elif res.status_code == 429:
-                logger.error(f"❌ VƯỢT RATE LIMIT (429) với từ khóa '{kw}'. Dừng lấy tin.")
-                logger.error(f"❌ RATE LIMIT (429) reached with keyword '{kw}'. Stopping fetch.")
+                logger.error(f"❌ RATE LIMIT 429 for keyword '{kw}'. Stop fetching further.")
                 return articles
             else:
-                logger.warning(f"⚠️ Lỗi NewsAPI ({res.status_code}) với từ khóa '{kw}': {res.text}")
-            time.sleep(1)
-                logger.warning(f"⚠️ NewsAPI error ({res.status_code}) for keyword '{kw}': {res.text}")
-            time.sleep(1) # Delay to stay within rate limits
+                logger.warning(f"⚠️ NewsAPI {res.status_code} for '{kw}': {res.text}")
+            time.sleep(1.0)  # small delay to be polite
         except requests.exceptions.RequestException as e:
-            logger.error(f"❌ Lỗi kết nối NewsAPI: {e}")
-            logger.error(f"❌ NewsAPI connection error: {e}")
-            time.sleep(5)
-    unique_articles = list({a['url']: a for a in articles}.values())
-    logger.info(f"Thu được {len(unique_articles)} bài viết duy nhất.")
-    logger.info(f"Successfully fetched {len(unique_articles)} unique articles.")
-    return unique_articles
+            logger.error(f"❌ NewsAPI connection error for '{kw}': {e}")
+            time.sleep(3.0)
+    # dedupe by url, preserve first occurrence
+    unique = {}
+    for a in articles:
+        if a["url"] not in unique:
+            unique[a["url"]] = a
+    unique_list = list(unique.values())
+    logger.info(f"✅ Fetched {len(unique_list)} unique articles.")
+    return unique_list
 
-# ========== 5️⃣ PHÂN TÍCH GEMINI ==========
-# ========== 5️⃣ ANALYZE WITH GEMINI ==========
+# ----------------- Gemini summarization -----------------
 def summarize_with_gemini(api_key, articles):
-    if not articles: return "Không có bài viết mới để phân tích."
     if not articles:
         return "Không có bài viết mới để phân tích."
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-2.5-flash")
-    summary = ""
+    summary_parts = []
     batch_size = 10
     for i in range(0, len(articles), batch_size):
-        batch_articles = articles[i:i + batch_size]
-        titles = "\n".join([f"- {a['title']} (Nguồn: {a['source']})" for a in batch_articles])
-        prompt = f"""Bạn là một chuyên gia phân tích kinh tế vĩ mô hàng đầu. Hãy phân tích danh sách các tiêu đề tin tức sau và trình bày kết quả bằng tiếng Việt theo định dạng Markdown chặt chẽ như sau:\n\n### 1. Xu Hướng Kinh Tế & Tài Chính Toàn Cầu\n- (Gạch đầu dòng cho mỗi xu hướng chính bạn nhận thấy)\n\n### 2. Tác Động Trực Tiếp Đến Kinh Tế Việt Nam\n- (Gạch đầu dòng cho mỗi tác động)\n\n### 3. Nhận Định Cơ Hội & Rủi Ro Đầu Tư Ngắn Hạn\n- **Vàng & Ngoại tệ:** (Nhận định của bạn)\n- **Chứng khoán:** (Nhận định của bạn)\n- **Bất động sản:** (Nhận định của bạn)\n- **Crypto:** (Nhận định của bạn)\n\n**DANH SÁCH TIN TỨC ĐỂ PHÂN TÍCH:**\n{titles}"""
+        batch = articles[i:i+batch_size]
+        titles = "\n".join([f"- {a['title']} (Nguồn: {a['source']})" for a in batch])
+        prompt = (
+            "Bạn là một chuyên gia phân tích kinh tế vĩ mô hàng đầu. "
+            "Hãy phân tích danh sách các tiêu đề tin tức sau và trình bày kết quả bằng tiếng Việt theo định dạng Markdown chặt chẽ:\n\n"
+            "### 1. Xu Hướng Kinh Tế & Tài Chính Toàn Cầu\n- (Gạch đầu dòng cho mỗi xu hướng chính bạn nhận thấy)\n\n"
+            "### 2. Tác Động Trực Tiếp Đến Kinh Tế Việt Nam\n- (Gạch đầu dòng cho mỗi tác động)\n\n"
+            "### 3. Nhận Định Cơ Hội & Rủi Ro Đầu TƯ NGẮN HẠN\n- **Vàng & Ngoại tệ:** (Nhận định)\n- **Chứng khoán:** (Nhận định)\n- **Bất động sản:** (Nhận định)\n- **Crypto:** (Nhận định)\n\n"
+            f"**DANH SÁCH TIN TỨC ĐỂ PHÂN TÍCH:**\n{titles}"
+        )
         try:
-            response = model.generate_content(prompt)
-            summary += response.text.strip() + "\n\n"
-            logger.info(f"✅ Hoàn thành batch {i//batch_size + 1} với {len(batch_articles)} bài.")
-            time.sleep(20)
-            logger.info(f"✅ Gemini analysis complete for batch {i//batch_size + 1}/{len(articles)//batch_size + 1}.")
-            time.sleep(20) # Delay to stay within Gemini's rate limits
+            resp = model.generate_content(prompt)
+            text = getattr(resp, "text", None) or str(resp)
+            summary_parts.append(text.strip())
+            logger.info(f"✅ Gemini batch {i//batch_size + 1} complete ({len(batch)} articles).")
+            time.sleep(18)  # avoid rate-limit
         except Exception as e:
-            logger.error(f"❌ Lỗi Gemini batch {i//batch_size + 1}: {e}")
-            logger.error(f"❌ Gemini error on batch {i//batch_size + 1}: {e}")
-            summary += f"### Lỗi Phân Tích Batch {i//batch_size + 1}\n- Đã xảy ra lỗi khi kết nối với Gemini.\n\n"
-    return summary.strip()
+            logger.error(f"❌ Gemini batch {i//batch_size + 1} error: {e}", exc_info=True)
+            summary_parts.append(f"### Lỗi Phân Tích Batch {i//batch_size + 1}\n- Lỗi khi kết nối với Gemini: {e}")
+    return "\n\n".join(summary_parts).strip()
 
-# ========== 6️⃣ TẠO PDF ==========
-# ========== 6️⃣ CREATE PDF REPORT ==========
+# ----------------- Create PDF -----------------
 def create_pdf(summary_text, articles):
-    filename = f"/tmp/Bao_cao_Kinh_te_{datetime.date.today()}.pdf"
+    filename = f"/tmp/Bao_cao_Kinh_te_{datetime.date.today().isoformat()}.pdf"
     doc = SimpleDocTemplate(filename, pagesize=A4)
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name='VN_Body', fontName=FONT_NAME, fontSize=11, leading=14))
-    styles.add(ParagraphStyle(name='VN_Title', fontName=FONT_NAME, fontSize=16, alignment=1, spaceAfter=12))
-    styles.add(ParagraphStyle(name='VN_Header', fontName=FONT_NAME, fontSize=12, leading=14, spaceBefore=10, spaceAfter=6))
-    story = [Paragraph("BÁO CÁO PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU & VIỆT NAM", styles['VN_Title']), Paragraph(f"Ngày: {datetime.date.today()}", styles['VN_Body']), Spacer(1, 20), Paragraph("<b>I. TỔNG HỢP & PHÂN TÍCH TỪ GEMINI</b>", styles['VN_Header'])]
+    styles.add(ParagraphStyle(name="VN_Body", fontName=FONT_NAME, fontSize=11, leading=14))
+    styles.add(ParagraphStyle(name="VN_Title", fontName=FONT_NAME, fontSize=16, alignment=1, spaceAfter=12))
+    styles.add(ParagraphStyle(name="VN_Header", fontName=FONT_NAME, fontSize=12, leading=14, spaceBefore=10, spaceAfter=6))
+
     story = [
-        Paragraph("BÁO CÁO PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU & VIỆT NAM", styles['VN_Title']),
-        Paragraph(f"Ngày: {datetime.date.today()}", styles['VN_Body']),
-        Spacer(1, 20),
-        Paragraph("<b>I. TỔNG HỢP & PHÂN TÍCH TỪ GEMINI</b>", styles['VN_Header'])
+        Paragraph("BÁO CÁO PHÂN TÍCH TIN TỨC KINH TẾ TOÀN CẦU & VIỆT NAM", styles["VN_Title"]),
+        Paragraph(f"Ngày: {datetime.date.today().isoformat()}", styles["VN_Body"]),
+        Spacer(1, 14),
+        Paragraph("<b>I. TỔNG HỢP & PHÂN TÍCH TỪ GEMINI</b>", styles["VN_Header"]),
+        Spacer(1, 6)
     ]
-    # Safely parse and add summary text
-    for line in summary_text.split('\n'):
-        if not line.strip(): continue
-        line = line.replace('### ', '<b>').replace('###', '<b>')
-        line = line.replace('### ', '<b>').replace('###', '<b>') # Handle markdown headers
-        if line.startswith('<b>'): line += '</b>'
-        line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
-        line = re.sub(r'\*\*(.*?)\*\*', r'<b>\\1</b>', line) # Handle markdown bold
+
+    # convert simple markdown to ReportLab-friendly HTML-ish markup
+    for line in summary_text.splitlines():
+        if not line.strip():
+            continue
+        ln = line
+        # headings: '### ' -> bold
+        ln = ln.replace("### ", "<b>").replace("###", "</b>")
+        # bold **text**
+        ln = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", ln)
+        # escape problematic characters minimally
+        ln = ln.replace("&", "&amp;")
         try:
-            story.append(Paragraph(line, styles['VN_Body']))
+            story.append(Paragraph(ln, styles["VN_Body"]))
         except Exception:
-            cleaned_line = re.sub(r'<[^>]*>', '', line)
-        except Exception: # Fallback for malformed HTML tags
-            cleaned_line = re.sub(r'<[^>]*>', '', line) # Strip all tags
-            story.append(Paragraph(cleaned_line, styles['VN_Body']))
-    story.extend([Spacer(1, 20), Paragraph("<b>II. DANH SÁCH TIN BÀI THAM KHẢO</b>", styles['VN_Header'])])
-    
-    story.extend([
-        Spacer(1, 20),
-        Paragraph("<b>II. DANH SÁCH TIN BÀI THAM KHẢO</b>", styles['VN_Header'])
-    ])
+            # fallback: strip tags
+            cleaned = re.sub(r"<[^>]*>", "", ln)
+            story.append(Paragraph(cleaned, styles["VN_Body"]))
+
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("<b>II. DANH SÁCH TIN BÀI THAM KHẢO</b>", styles["VN_Header"]))
+    story.append(Spacer(1, 6))
+
     for a in articles:
         link = f"- <a href='{a['url']}' color='blue'>{a['title']}</a> (<i>{a['source']}</i>)"
-        story.append(Paragraph(link, styles['VN_Body']))
-        story.append(Spacer(1, 2))
-    
+        try:
+            story.append(Paragraph(link, styles["VN_Body"]))
+        except Exception:
+            cleaned = re.sub(r"<[^>]*>", "", link)
+            story.append(Paragraph(cleaned, styles["VN_Body"]))
+        story.append(Spacer(1, 4))
+
     doc.build(story)
-    logger.info(f"📄 Đã tạo file PDF thành công: {filename}")
-    logger.info(f"📄 PDF report created successfully: {filename}")
+    logger.info(f"📄 PDF created: {filename}")
     return filename
 
-# ========== 7️⃣ GỬI EMAIL (QUA FORMSUBMIT) ==========
-def send_email_via_formsubmit(subject, body, attachment_path):
-    formsubmit_url = f"https://formsubmit.co/{FORMSUBMIT_EMAIL}"
-    logger.info(f" Gửi email qua FormSubmit tới {formsubmit_url}...")
-# ========== 7️⃣ UPLOAD TO GOOGLE DRIVE ==========
+# ----------------- Upload to Google Drive -----------------
 def upload_to_drive(file_path):
+    """
+    Uploads file at file_path to GOOGLE_DRIVE_FOLDER_ID using GOOGLE_CREDENTIALS_JSON.
+    Returns dict { 'ok': bool, 'file_id': str|None, 'webViewLink': str|None }
+    """
+    result = {"ok": False, "file_id": None, "webViewLink": None}
     try:
-        with open(attachment_path, "rb") as f:
-            pdf_data = f.read()
-        payload = {'_subject': subject, 'message': body}
-        files = {'attachment': (os.path.basename(attachment_path), pdf_data, 'application/pdf')}
-        response = requests.post(formsubmit_url, data=payload, files=files, timeout=30)
-        if 200 <= response.status_code < 400:
-            logger.info("✅ Yêu cầu gửi email đã được FormSubmit chấp nhận thành công!")
-            return True
-        else:
-            logger.error(f"❌ FormSubmit trả về lỗi {response.status_code}: {response.text}")
-            return False
-        logger.info("Starting Google Drive upload process...")
-        
-        # Load credentials from environment variable
+        logger.info("⬆️ Starting Google Drive upload...")
+
+        # Parse credentials JSON (stored in env variable as JSON string)
         creds_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-        creds = service_account.Credentials.from_service_account_info(creds_info)
-        
-        # Build the Drive service
-        service = build('drive', 'v3', credentials=creds)
-        
+        scopes = ["https://www.googleapis.com/auth/drive.file"]
+        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
+
+        drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+
         file_metadata = {
-            'name': os.path.basename(file_path),
-            'parents': [GOOGLE_DRIVE_FOLDER_ID]
+            "name": os.path.basename(file_path),
+            "parents": [GOOGLE_DRIVE_FOLDER_ID]
         }
-        
-        media = MediaFileUpload(file_path, mimetype='application/pdf')
-        
-        logger.info(f"Uploading '{os.path.basename(file_path)}' to Drive folder...")
-        
-        file = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id'
-        ).execute()
-        
-        logger.info(f"✅ File uploaded successfully! File ID: {file.get('id')}")
-        return True
+        media = MediaFileUpload(file_path, mimetype="application/pdf", resumable=True)
+
+        logger.info(f"Uploading '{os.path.basename(file_path)}' to Drive folder ID {GOOGLE_DRIVE_FOLDER_ID} ...")
+
+        request = drive_service.files().create(body=file_metadata, media_body=media, fields="id, webViewLink")
+        response = None
+        # execute with resumable upload support
+        response = request.execute()
+
+        file_id = response.get("id")
+        webview = response.get("webViewLink") or None
+
+        logger.info(f"✅ Upload succeeded. File ID: {file_id}")
+        if webview:
+            logger.info(f"🔗 Web view link: {webview}")
+
+        result.update({"ok": True, "file_id": file_id, "webViewLink": webview})
+        return result
 
     except Exception as e:
-        logger.error(f"❌ Lỗi không xác định khi gọi FormSubmit: {e}")
-        logger.error(f"❌ Error uploading to Google Drive: {e}", exc_info=True)
-        return False
+        logger.error("❌ Google Drive upload failed.", exc_info=True)
+        result["ok"] = False
+        return result
 
-# ========== 8️⃣ CHẠY BÁO CÁO ==========
-# ========== 8️⃣ RUN REPORT WORKFLOW ==========
+# ----------------- Run report workflow -----------------
 def run_report():
+    # Use non-blocking acquire so /report trigger returns quickly if busy
     if not REPORT_LOCK.acquire(blocking=False):
-        logger.warning("🚫 Báo cáo đang được xử lý. Bỏ qua trigger mới.")
-        logger.warning("🚫 Another report is already running. Skipping new trigger.")
+        logger.warning("🚫 A report is already running. Skipping this trigger.")
         return
-    
+
     pdf_file = None
     try:
-        logger.info(f"============ 🕒 BẮT ĐẦU TẠO BÁO CÁO MỚI 🕒 ============")
-        logger.info(f"============ 🕒 STARTING NEW REPORT TASK 🕒 ============")
+        logger.info("============ 🕒 STARTING NEW REPORT TASK 🕒 ============")
         articles = get_news(KEYWORDS)
-        if articles:
-            logger.info(f"🤖 Bắt đầu phân tích {len(articles)} bài viết bằng Gemini...")
-            logger.info(f"🤖 Analyzing {len(articles)} articles with Gemini...")
-            summary = summarize_with_gemini(GEMINI_API_KEY, articles)
-            pdf_file = create_pdf(summary, articles)
-            send_email_via_formsubmit(f"Báo Cáo Kinh Tế AI - {datetime.date.today()}", "Đính kèm là báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam mới nhất.", pdf_file)
-            
-            # Replace email sending with Drive upload
-            upload_to_drive(pdf_file)
-            
+        if not articles:
+            logger.info("ℹ️ No articles fetched. Skipping report generation.")
+            return
+
+        logger.info(f"🤖 Analyzing {len(articles)} articles with Gemini...")
+        summary = summarize_with_gemini(GEMINI_API_KEY, articles)
+
+        pdf_file = create_pdf(summary, articles)
+
+        logger.info("📤 Uploading PDF to Google Drive...")
+        upload_result = upload_to_drive(pdf_file)
+        if upload_result.get("ok"):
+            logger.info("🎉 Report uploaded to Google Drive successfully.")
+            if upload_result.get("webViewLink"):
+                logger.info(f"📎 View link: {upload_result.get('webViewLink')}")
         else:
-            logger.info("ℹ️ Không có bài viết mới hoặc đã gặp lỗi khi lấy tin. Bỏ qua việc tạo báo cáo.")
-        logger.info("============ 🎯 HOÀN TẤT TÁC VỤ BÁO CÁO 🎯 ============")
-            logger.info("ℹ️ No new articles or fetch error occurred. Skipping report generation.")
-        
-        logger.info("============ 🎯 REPORT TASK COMPLETED 🎯 ============")
+            logger.error("❌ Failed to upload report to Google Drive.")
 
     except Exception as e:
-        logger.error(f"❌ Lỗi nghiêm trọng trong quá trình chạy báo cáo: {e}", exc_info=True)
-        logger.error(f"❌ A critical error occurred during the report run: {e}", exc_info=True)
+        logger.error("❌ Critical error in run_report.", exc_info=True)
     finally:
-        # Clean up the temporary PDF file
+        # cleanup
         if pdf_file and os.path.exists(pdf_file):
-            os.remove(pdf_file)
-            logger.info(f"🗑️ Đã xóa file tạm: {pdf_file}")
-            logger.info(f"🗑️ Cleaned up temporary file: {pdf_file}")
-        
-        # Release the lock
+            try:
+                os.remove(pdf_file)
+                logger.info(f"🗑️ Removed temporary file: {pdf_file}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not remove temp file: {e}")
         REPORT_LOCK.release()
+        logger.info("============ 🎯 REPORT TASK COMPLETED 🎯 ============")
 
-# ========== 9️⃣ LỊCH TRÌNH ==========
-# ========== 9️⃣ SCHEDULER SETUP ==========
-# Schedule runs at 01:00 UTC (8 AM Vietnam) and 16:00 UTC (11 PM Vietnam)
-schedule.every().day.at("01:00").do(run_report)
-schedule.every().day.at("16:00").do(run_report)
-
+# ----------------- Scheduler -----------------
 def schedule_runner():
-    logger.info("🚀 [SCHEDULER] Đã khởi động. Chờ đến lịch chạy...")
-    logger.info("🚀 Scheduler started. Waiting for scheduled jobs...")
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    # schedule every day at 01:00 and 16:00 UTC
+    schedule.clear()
+    schedule.every().day.at("01:00").do(run_report)
+    schedule.every().day.at("16:00").do(run_report)
+    logger.info("🚀 Scheduler set: 01:00 and 16:00 UTC (08:00 & 23:00 Vietnam time)")
 
-# ========== 1️⃣0️⃣ SERVER ==========
-# ========== 1️⃣0️⃣ WEB SERVER (FLASK + WAITRESS) ==========
+    while True:
+        try:
+            schedule.run_pending()
+        except Exception as e:
+            logger.error(f"⚠️ Scheduler error: {e}", exc_info=True)
+        time.sleep(30)
+
+# ----------------- Flask app -----------------
 app = Flask(__name__)
 
 @app.route("/")
 def index():
     try:
-        jobs_info = "<br>".join([str(job) for job in schedule.get_jobs()])
-        if not jobs_info: jobs_info = "Chưa có lịch trình nào được thiết lập."
-    except Exception: jobs_info = "Không thể lấy thông tin lịch trình."
-    return f"""<html><body style='font-family: sans-serif; text-align: center; padding-top: 50px;'><h2>🤖 Dịch Vụ Báo Cáo Kinh Tế AI đang hoạt động</h2><p><strong>Lịch trình đã thiết lập (giờ UTC):</strong></p><div style='background-color: #f0f0f0; padding: 10px; border-radius: 5px; display: inline-block;'><code>{jobs_info}</code></div><p style='margin-top: 20px;'><a href='/report' target='_blank'>Chạy báo cáo thủ công</a></p><p><small>(Sẽ không có tác dụng nếu đang có báo cáo khác chạy)</small></p></body></html>""", 200
-        if not jobs_info:
-            jobs_info = "No schedule set."
+        jobs_info = "<br>".join([str(job) for job in schedule.get_jobs()]) or "No schedule set."
     except Exception:
         jobs_info = "Could not retrieve schedule information."
-    
-    return f"""<html><body style='font-family: sans-serif; text-align: center; padding-top: 50px;'>
-    <h2>🤖 AI Economic Report Service is running</h2>
-    <p><strong>Reports are stored in:</strong> Google Drive</p>
-    <p><strong>Scheduled runs (UTC time):</strong></p>
-    <div style='background-color: #f0f0f0; padding: 10px; border-radius: 5px; display: inline-block;'>
-    <code>{jobs_info}</code>
-    </div>
-    <p style='margin-top: 20px;'><a href='/report' target='_blank'>Run report manually</a></p>
-    <p><small>(This will be ignored if a report is already in progress)</small></p>
-    </body></html>""", 200
+    html = f"""
+    <html>
+    <body style='font-family: sans-serif; text-align: center; padding-top: 50px;'>
+      <h2>🤖 AI Economic Report Service is running</h2>
+      <p><strong>Reports are uploaded to Google Drive folder ID:</strong> {GOOGLE_DRIVE_FOLDER_ID}</p>
+      <p><strong>Scheduled runs (UTC):</strong></p>
+      <div style='background-color: #f0f0f0; padding: 10px; border-radius: 5px; display: inline-block;'>
+        <code>{jobs_info}</code>
+      </div>
+      <p style='margin-top: 20px;'><a href='/report' target='_blank'>Run report manually</a></p>
+      <p><small>(Ignored if a report is already in progress)</small></p>
+    </body>
+    </html>
+    """
+    return html, 200
 
 @app.route("/report")
 def trigger_report():
-    threading.Thread(target=run_report).start()
-    return "🚀 Yêu cầu tạo báo cáo đã được gửi. Vui lòng theo dõi log để xem tiến trình.", 202
-    return "🚀 Report generation has been triggered. Please monitor the logs for progress.", 202
+    if REPORT_LOCK.locked():
+        logger.warning("🚫 Report request received but a report is already running.")
+        return "🚫 A report is already running. Try again later.", 429
+    threading.Thread(target=run_report, daemon=True).start()
+    return "🚀 Report generation started. Monitor logs for progress.", 202
 
 @app.route("/health")
-def health_check(): return "OK", 200
 def health_check():
     return "OK", 200
 
-@app.route('/favicon.ico')
-def favicon(): return Response(status=204)
-
-# Endpoint /activate-formsubmit đã được xóa đi
+@app.route("/favicon.ico")
 def favicon():
     return Response(status=204)
 
+# ----------------- Main -----------------
 if __name__ == "__main__":
-    scheduler_thread = threading.Thread(target=schedule_runner, daemon=True)
-    scheduler_thread.start()
-    logger.info(f"🌐 Khởi động server trên cổng {PORT}...")
-    logger.info(f"🌐 Starting production server on port {PORT}...")
-    serve(app, host='0.0.0.0', port=PORT)
-
+    # Start scheduler thread
+    threading.Thread(target=schedule_runner, daemon=True).start()
+    logger.info(f"🌐 Starting server on port {PORT} ...")
+    serve(app, host="0.0.0.0", port=PORT)
