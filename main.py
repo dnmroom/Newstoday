@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Auto Economic News Summary & Drive Upload (v4.2a - Stable)
+Auto Economic News Summary & Drive Upload (v4.3 - Final Fix)
 Author: Gemini (2025)
 Workflow: NewsAPI → Gemini → PDF → Google Drive Upload
-Env Vars: GEMINI_API_KEY, GOOGLE_CREDENTIALS_JSON, GOOGLE_DRIVE_FOLDER_ID, NEWSAPI_KEY, PORT
+Fix: Correctly handles Markdown to HTML conversion for PDF generation.
 """
 
 import os, json, time, logging, requests, schedule, threading, re
@@ -72,19 +72,20 @@ except Exception as e:
 
 # ------------------ Keywords ------------------
 KEYWORDS = [
-    "global economy", "Vietnam economy", "stock market", "real estate",
-    "gold price", "silver price", "oil price", "inflation", "US dollar",
+    "global economy", "DXY", "stock market", "real estate",
+    "gold price", "silver price", "gold market", "silver market", "oil price", "inflation", "US dollar",
     "FDI Vietnam", "manufacturing PMI", "interest rate", "FED", "recession",
     "infrastructure Vietnam", "supply chain", "trade balance"
 ]
 
 # ------------------ Gemini Init ------------------
 genai.configure(api_key=GEMINI_API_KEY)
-MODEL = genai.GenerativeModel("gemini-2.0-flash")
+MODEL = genai.GenerativeModel("gemini-1.5-flash") # Using 1.5-flash for potential better formatting
 
 # ------------------ Get News ------------------
 def get_news():
     all_articles = []
+    logger.info("🔄 Fetching news for %d keywords...", len(KEYWORDS))
     for kw in KEYWORDS:
         url = f"https://newsapi.org/v2/everything?q={requests.utils.quote(kw)}&language=en&pageSize=3&apiKey={NEWSAPI_KEY}"
         try:
@@ -120,7 +121,8 @@ def summarize(articles):
     titles = "\n".join([f"- {a['title']} ({a['source']})" for a in articles])
     prompt = (
         "Bạn là chuyên gia kinh tế. Hãy viết bản tổng hợp & phân tích tin tức sau bằng tiếng Việt, "
-        "gồm các mục: \n1. Xu hướng toàn cầu \n2. Ảnh hưởng đến kinh tế Việt Nam \n3. Cơ hội & rủi ro đầu tư.\n\n"
+        "sử dụng Markdown cho tiêu đề (ví dụ: ### Tiêu đề) và in đậm (ví dụ: **nội dung**).\n"
+        "Gồm các mục: \n1. Xu hướng toàn cầu \n2. Ảnh hưởng đến kinh tế Việt Nam \n3. Cơ hội & rủi ro đầu tư.\n\n"
         f"Danh sách tin:\n{titles}"
     )
     try:
@@ -144,13 +146,21 @@ def create_pdf(summary, articles):
         Paragraph("<b>I. PHÂN TÍCH & TỔNG HỢP</b>", styles["VN"]),
         Spacer(1, 6)
     ]
+
+    # === FIX: Correctly handle markdown to HTML conversion ===
     for line in summary.splitlines():
         if line.strip():
-            story.append(Paragraph(line.replace("**", "<b>").replace("**", "</b>"), styles["VN"]))
+            # Handle headers (### Text)
+            line = re.sub(r'^\s*###\s*(.*)', r'<b>\1</b>', line)
+            # Handle bold text (**Text**)
+            line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
+            story.append(Paragraph(line, styles["VN"]))
+    # ==========================================================
+
     story.append(Spacer(1, 12))
     story.append(Paragraph("<b>II. DANH SÁCH TIN</b>", styles["VN"]))
     for a in articles:
-        story.append(Paragraph(f"- <a href='{a['url']}'>{a['title']}</a> ({a['source']})", styles["VN"]))
+        story.append(Paragraph(f"- <a href='{a['url']}' color='blue'>{a['title']}</a> (<i>{a['source']}</i>)", styles["VN"]))
     doc.build(story)
     logger.info("📄 PDF created: %s", pdf_path)
     return pdf_path
@@ -199,8 +209,8 @@ def run_report():
 # ------------------ Scheduler ------------------
 def scheduler_thread():
     schedule.clear()
-    schedule.every().day.at("01:00").do(run_report)
-    schedule.every().day.at("16:00").do(run_report)
+    schedule.every().day.at("01:00").do(run_report) # 08:00 VN
+    schedule.every().day.at("16:00").do(run_report) # 23:00 VN
     logger.info("⏰ Scheduler set: 01:00 & 16:00 UTC (08:00 & 23:00 VN)")
     while True:
         schedule.run_pending()
@@ -213,8 +223,8 @@ app = Flask(__name__)
 def index():
     return f"""
     <h3>🤖 AI Economic Report Service</h3>
-    <p>Drive folder: {GOOGLE_DRIVE_FOLDER_ID}</p>
-    <p><a href='/report'>Run report manually</a></p>
+    <p>Drive folder ID: ...{GOOGLE_DRIVE_FOLDER_ID[-10:]}</p>
+    <p><a href='/report' target='_blank'>Run report manually</a></p>
     """
 
 @app.route("/report")
@@ -235,3 +245,4 @@ if __name__ == "__main__":
     threading.Thread(target=scheduler_thread, daemon=True).start()
     logger.info("🌐 Server running on port %s", PORT)
     serve(app, host="0.0.0.0", port=PORT)
+
