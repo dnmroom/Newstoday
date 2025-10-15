@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Auto Economic News Summary & Analysis (v4.2)
-- Generates PDF reports from NewsAPI + Gemini
-- Uploads PDF to Google Drive using a Service Account
-- Sets public view permission (anyone with link)
-- Sends email via SendGrid with both attachment and Drive link
-- Scheduler + Flask + Waitress (Render-ready)
+Auto Economic News Summary & Drive Upload (v4.2 - Drive-only)
+- Uses: GEMINI_API_KEY, GOOGLE_CREDENTIALS_JSON, GOOGLE_DRIVE_FOLDER_ID, NEWSAPI_KEY, PORT
+- Workflow: NewsAPI -> Gemini -> PDF -> Google Drive upload -> log link
 """
 
 import os
@@ -16,9 +13,7 @@ import logging
 import requests
 import schedule
 import threading
-import base64
 import re
-
 from datetime import date, datetime
 from flask import Flask, Response
 from waitress import serve
@@ -29,65 +24,53 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 import google.generativeai as genai
-
-# Google Drive libs
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# SendGrid
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
-
-# ---------- Logging ----------
+# ----------------------- Logging -----------------------
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
-log_file = os.path.join(LOG_DIR, "app.log")
+log_path = os.path.join(LOG_DIR, "app.log")
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler(log_file, encoding="utf-8"),
+        logging.FileHandler(log_path, encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-# ---------- Globals & Config ----------
+# ----------------------- Config / Env -----------------------
 REPORT_LOCK = threading.Lock()
 
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")  # JSON string
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")  # comma-separated allowed
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 PORT = int(os.getenv("PORT", 10000))
 
 required = {
-    "NEWSAPI_KEY": NEWSAPI_KEY,
     "GEMINI_API_KEY": GEMINI_API_KEY,
     "GOOGLE_CREDENTIALS_JSON": GOOGLE_CREDENTIALS_JSON,
     "GOOGLE_DRIVE_FOLDER_ID": GOOGLE_DRIVE_FOLDER_ID,
-    "SENDGRID_API_KEY": SENDGRID_API_KEY,
-    "EMAIL_SENDER": EMAIL_SENDER,
-    "EMAIL_RECEIVER": EMAIL_RECEIVER
+    "NEWSAPI_KEY": NEWSAPI_KEY
 }
 missing = [k for k, v in required.items() if not v]
 if missing:
-    logger.error(f"❌ MISSING ENV VARS: {missing}. Please set them before running.")
+    logger.error("❌ Missing required environment variables: %s. Exiting.", missing)
     raise SystemExit(1)
 
-HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+HTTP_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# ---------- Fonts ----------
+# ----------------------- Font -----------------------
 FONT_PATH = "/tmp/NotoSans-Regular.ttf"
 FONT_NAME = "Helvetica"
 try:
     if not os.path.exists(FONT_PATH):
-        logger.info("⏳ Downloading NotoSans font...")
+        logger.info("⏳ Downloading NotoSans...")
         r = requests.get(
             "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf",
             stream=True, timeout=30, headers=HTTP_HEADERS
@@ -98,27 +81,27 @@ try:
                 f.write(chunk)
     pdfmetrics.registerFont(TTFont("NotoSans", FONT_PATH))
     FONT_NAME = "NotoSans"
-    logger.info("✅ Font NotoSans registered.")
+    logger.info("✅ NotoSans registered.")
 except Exception as e:
-    logger.warning(f"⚠️ Could not download/register NotoSans: {e}. Falling back to Helvetica.")
+    logger.warning("⚠️ NotoSans download/register failed: %s . Using Helvetica.", e)
     FONT_NAME = "Helvetica"
 
-# ---------- Keywords ----------
+# ----------------------- Keywords -----------------------
 KEYWORDS = [
     "global economy", "Vietnam economy", "stock market", "real estate",
-    "gold price", "silver price",  "gold market", "silver market", "monetary policy", "interest rate",
+    "gold price", "silver price", "gold market", "silver market" "monetary policy", "interest rate",
     "US dollar", "inflation", "FDI Vietnam", "export growth",
-    "manufacturing PMI", "DXY", "tech industry", "FED",
+    "manufacturing PMI", "FED", "tech industry", "DXY",
     "infrastructure Vietnam", "trade agreements", "supply chain", "recession"
 ]
 
-# ---------- Initialize Gemini client ----------
+# ----------------------- Gemini init -----------------------
 genai.configure(api_key=GEMINI_API_KEY)
 
-# ---------- Functions ----------
+# ----------------------- Fetch news -----------------------
 def get_news(keywords):
-    logger.info(f"🔄 Fetching news for {len(keywords)} keywords...")
     articles = []
+    logger.info("🔄 Fetching news from NewsAPI for %d keywords...", len(keywords))
     for kw in keywords:
         try:
             url = f"https://newsapi.org/v2/everything?q={requests.utils.quote(kw)}&language=en&pageSize=3&apiKey={NEWSAPI_KEY}"
@@ -136,47 +119,52 @@ def get_news(keywords):
                             "keyword": kw
                         })
             elif res.status_code == 429:
-                logger.warning(f"⚠️ NewsAPI rate limit (429) for keyword '{kw}'.")
+                logger.warning("⚠️ NewsAPI rate limit (429) for keyword '%s'", kw)
                 return articles
             else:
-                logger.warning(f"⚠️ NewsAPI error ({res.status_code}) for '{kw}': {res.text}")
+                logger.warning("⚠️ NewsAPI error (%s) for '%s': %s", res.status_code, kw, res.text)
             time.sleep(0.8)
         except Exception as e:
-            logger.error(f"❌ NewsAPI connection error for '{kw}': {e}")
-            time.sleep(3)
+            logger.error("❌ NewsAPI error for '%s': %s", kw, e, exc_info=True)
+            time.sleep(2.0)
     # dedupe by url
     unique = {}
     for a in articles:
         if a["url"] not in unique:
             unique[a["url"]] = a
-    logger.info(f"✅ Fetched {len(unique)} unique articles.")
+    logger.info("✅ Fetched %d unique articles.", len(unique))
     return list(unique.values())
 
+# ----------------------- Summarize with Gemini -----------------------
 def summarize_with_gemini(articles):
     if not articles:
         return "Không có bài viết mới để phân tích."
     model = genai.GenerativeModel("gemini-2.5-flash")
-    summary = ""
+    parts = []
     batch_size = 10
     for i in range(0, len(articles), batch_size):
         batch = articles[i:i+batch_size]
         titles = "\n".join([f"- {a['title']} (Nguồn: {a['source']})" for a in batch])
         prompt = (
-            "Bạn là một chuyên gia phân tích kinh tế vĩ mô. Hãy phân tích danh sách tiêu đề sau và trả lời bằng tiếng Việt, "
-            "theo định dạng Markdown với 3 phần: (1) Xu hướng kinh tế & tài chính toàn cầu; (2) Tác động tới Việt Nam; (3) Nhận định cơ hội & rủi ro đầu tư ngắn hạn.\n\n"
-            f"DANH SÁCH TIN: \n{titles}"
+            "Bạn là một chuyên gia phân tích kinh tế vĩ mô. Hãy phân tích danh sách tiêu đề sau và "
+            "trả lời bằng tiếng Việt theo định dạng Markdown gồm:\n\n"
+            "1) Xu hướng kinh tế & tài chính toàn cầu\n"
+            "2) Tác động trực tiếp đến kinh tế Việt Nam\n"
+            "3) Nhận định cơ hội & rủi ro đầu tư ngắn hạn (vàng, chứng khoán, bất động sản, crypto)\n\n"
+            f"DANH SÁCH TIN:\n{titles}"
         )
         try:
             resp = model.generate_content(prompt)
             text = getattr(resp, "text", None) or str(resp)
-            summary += text.strip() + "\n\n"
-            logger.info(f"✅ Gemini batch {i//batch_size + 1} completed ({len(batch)} items).")
+            parts.append(text.strip())
+            logger.info("✅ Gemini batch %d complete (%d items).", i//batch_size + 1, len(batch))
             time.sleep(18)
         except Exception as e:
-            logger.error(f"❌ Gemini error on batch {i//batch_size + 1}: {e}", exc_info=True)
-            summary += f"### Lỗi phân tích batch {i//batch_size + 1}\n- Lỗi: {e}\n\n"
-    return summary.strip()
+            logger.error("❌ Gemini error on batch %d: %s", i//batch_size + 1, e, exc_info=True)
+            parts.append(f"### Lỗi phân tích batch {i//batch_size + 1}\n- Lỗi: {e}")
+    return "\n\n".join(parts).strip()
 
+# ----------------------- Create PDF -----------------------
 def create_pdf(summary_text, articles):
     filename = f"/tmp/Bao_cao_Kinh_te_{date.today().isoformat()}.pdf"
     doc = SimpleDocTemplate(filename, pagesize=A4)
@@ -201,12 +189,13 @@ def create_pdf(summary_text, articles):
         try:
             story.append(Paragraph(ln, styles["VN_Body"]))
         except Exception:
-            clean = re.sub(r"<[^>]*>", "", ln)
-            story.append(Paragraph(clean, styles["VN_Body"]))
+            cleaned = re.sub(r"<[^>]*>", "", ln)
+            story.append(Paragraph(cleaned, styles["VN_Body"]))
 
     story.append(Spacer(1, 12))
     story.append(Paragraph("<b>II. DANH SÁCH TIN THAM KHẢO</b>", styles["VN_Header"]))
     story.append(Spacer(1, 6))
+
     for a in articles:
         link = f"- <a href='{a['url']}' color='blue'>{a['title']}</a> (<i>{a['source']}</i>)"
         try:
@@ -216,105 +205,67 @@ def create_pdf(summary_text, articles):
         story.append(Spacer(1, 4))
 
     doc.build(story)
-    logger.info(f"📄 PDF created: {filename}")
+    logger.info("📄 PDF created: %s", filename)
     return filename
 
+# ----------------------- Upload to Google Drive -----------------------
 def upload_to_drive(file_path, max_retries=3):
     """
-    Upload a local file to Google Drive folder specified in GOOGLE_DRIVE_FOLDER_ID.
-    Returns dict: { 'ok': bool, 'file_id': str|None, 'webViewLink': str|None, 'error': str|None }
+    Uploads file_path to GOOGLE_DRIVE_FOLDER_ID using GOOGLE_CREDENTIALS_JSON (service account).
+    Returns dict: {ok: bool, file_id: str|None, webViewLink: str|None, error: str|None}
     """
     result = {"ok": False, "file_id": None, "webViewLink": None, "error": None}
+
     try:
         creds_info = json.loads(GOOGLE_CREDENTIALS_JSON)
     except Exception as e:
-        logger.error("❌ GOOGLE_CREDENTIALS_JSON is not valid JSON.", exc_info=True)
+        logger.error("❌ GOOGLE_CREDENTIALS_JSON parse error: %s", e, exc_info=True)
         result["error"] = f"Invalid credentials JSON: {e}"
         return result
 
-    scopes = ["https://www.googleapis.com/auth/drive"]
+    scopes = ["https://www.googleapis.com/auth/drive.file"]
     try:
         creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
-        drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+        drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception as e:
-        logger.error("❌ Failed creating Drive service.", exc_info=True)
+        logger.error("❌ Could not create Drive service: %s", e, exc_info=True)
         result["error"] = str(e)
         return result
 
-    file_name = os.path.basename(file_path)
-    metadata = {"name": file_name, "parents": [GOOGLE_DRIVE_FOLDER_ID]}
-
+    metadata = {"name": os.path.basename(file_path), "parents": [GOOGLE_DRIVE_FOLDER_ID]}
     media = MediaFileUpload(file_path, mimetype="application/pdf", resumable=True)
 
     attempt = 0
     while attempt < max_retries:
         attempt += 1
         try:
-            logger.info(f"⬆️ Upload attempt {attempt} for {file_name} ...")
-            req = drive.files().create(body=metadata, media_body=media, fields="id, webViewLink")
+            logger.info("⬆️ Drive upload attempt %d for %s", attempt, file_path)
+            req = drive_service.files().create(body=metadata, media_body=media, fields="id, webViewLink")
             file = req.execute()
             file_id = file.get("id")
-            webview = file.get("webViewLink") or None
+            webview = file.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
             result.update({"ok": True, "file_id": file_id, "webViewLink": webview})
-            logger.info(f"✅ Uploaded to Drive. fileId={file_id}")
-            # Set permission to anyone with link can read (optional)
+            logger.info("✅ Uploaded to Drive: id=%s", file_id)
+            # Optional: set permission to anyone with link (best-effort)
             try:
-                drive.permissions().create(
+                drive_service.permissions().create(
                     fileId=file_id,
                     body={"role": "reader", "type": "anyone"},
-                    fields="id"
                 ).execute()
-                logger.info("🔓 Permission set: anyone with link can view.")
+                logger.info("🔓 Set permission: anyone with link can view (best-effort).")
             except Exception as e:
-                logger.warning(f"⚠️ Could not set permission to anyoneWithLink: {e}")
+                logger.debug("Could not set public permission: %s", e)
             return result
         except Exception as e:
-            logger.error(f"❌ Drive upload attempt {attempt} failed: {e}", exc_info=True)
+            logger.error("❌ Drive upload attempt %d failed: %s", attempt, e, exc_info=True)
             result["error"] = str(e)
             time.sleep(5 * attempt)
     return result
 
-def send_email_with_sendgrid(subject, body_text, drive_link, attachment_path):
-    """
-    Send email via SendGrid: include drive_link in body and attach the file.
-    """
-    try:
-        # Read and encode attachment
-        with open(attachment_path, "rb") as f:
-            data = f.read()
-        encoded = base64.b64encode(data).decode()
-
-        message = Mail(
-            from_email=EMAIL_SENDER,
-            to_emails=[e.strip() for e in EMAIL_RECEIVER.split(",") if e.strip()],
-            subject=subject,
-            html_content=f"<p>{body_text}</p><p><b>Link Drive:</b> <a href='{drive_link}' target='_blank'>{drive_link}</a></p>"
-        )
-        attachment = Attachment(
-            FileContent(encoded),
-            FileName(os.path.basename(attachment_path)),
-            FileType("application/pdf"),
-            Disposition("attachment")
-        )
-        message.attachment = attachment
-
-        sg = SendGridAPIClient(SENDGRID_API_KEY)
-        response = sg.send(message)
-        status = getattr(response, "status_code", None)
-        logger.info(f"📧 SendGrid response status: {status}")
-        if status and 200 <= int(status) < 300:
-            logger.info("✅ Email sent successfully via SendGrid.")
-            return True
-        else:
-            logger.error(f"❌ SendGrid returned status {status}: {getattr(response, 'body', None)}")
-            return False
-    except Exception as e:
-        logger.error(f"❌ Error sending email via SendGrid: {e}", exc_info=True)
-        return False
-
+# ----------------------- Run report workflow -----------------------
 def run_report():
     if not REPORT_LOCK.acquire(blocking=False):
-        logger.warning("🚫 Report is already running. Skipping this trigger.")
+        logger.warning("🚫 Report already running. Skipping.")
         return
 
     pdf_path = None
@@ -322,51 +273,34 @@ def run_report():
         logger.info("============ 🕒 STARTING REPORT TASK 🕒 ============")
         articles = get_news(KEYWORDS)
         if not articles:
-            logger.info("ℹ️ No articles found. Aborting report.")
+            logger.info("ℹ️ No articles fetched. Nothing to do.")
             return
 
-        logger.info(f"🤖 Summarizing {len(articles)} articles...")
+        logger.info("🤖 Summarizing articles with Gemini...")
         summary = summarize_with_gemini(articles)
 
         pdf_path = create_pdf(summary, articles)
 
-        # Upload to Drive
-        upload_res = upload_to_drive(pdf_path)
-        if upload_res.get("ok"):
-            drive_link = upload_res.get("webViewLink") or f"https://drive.google.com/file/d/{upload_res.get('file_id')}/view"
-            logger.info(f"🔗 Drive link: {drive_link}")
+        upload_result = upload_to_drive(pdf_path)
+        if upload_result.get("ok"):
+            logger.info("🎉 Report uploaded to Drive successfully.")
+            logger.info("🔗 Drive link: %s", upload_result.get("webViewLink"))
         else:
-            drive_link = None
-            logger.error(f"💥 Upload to Drive failed: {upload_res.get('error')}")
-
-        # Send email with both attachment and link (if available)
-        subject = f"Báo Cáo Kinh Tế AI - {date.today().isoformat()}"
-        body = "Đính kèm báo cáo phân tích tin tức kinh tế toàn cầu & Việt Nam (được tạo tự động)."
-        if drive_link:
-            sent = send_email_with_sendgrid(subject, body, drive_link, pdf_path)
-        else:
-            # fallback: send email without drive link but with attachment
-            sent = send_email_with_sendgrid(subject, body, "", pdf_path)
-
-        if sent:
-            logger.info("🎉 Report workflow completed: email sent.")
-        else:
-            logger.error("❌ Report workflow completed but email sending failed.")
+            logger.error("💥 Upload failed: %s", upload_result.get("error"))
 
     except Exception as e:
-        logger.error(f"❌ Critical error in run_report: {e}", exc_info=True)
+        logger.error("❌ Critical error during run_report: %s", e, exc_info=True)
     finally:
-        # cleanup temp file
         if pdf_path and os.path.exists(pdf_path):
             try:
                 os.remove(pdf_path)
-                logger.info(f"🗑️ Removed temp file: {pdf_path}")
+                logger.info("🗑️ Removed temporary file: %s", pdf_path)
             except Exception as e:
-                logger.warning(f"⚠️ Could not remove temp file: {e}")
+                logger.warning("⚠️ Could not remove temp file: %s", e)
         REPORT_LOCK.release()
         logger.info("============ 🎯 REPORT TASK FINISHED 🎯 ============")
 
-# ---------- Scheduler ----------
+# ----------------------- Scheduler -----------------------
 def schedule_runner():
     schedule.clear()
     schedule.every().day.at("01:00").do(run_report)  # 01:00 UTC (08:00 VN)
@@ -376,25 +310,25 @@ def schedule_runner():
         try:
             schedule.run_pending()
         except Exception as e:
-            logger.error(f"⚠️ Scheduler error: {e}", exc_info=True)
+            logger.error("⚠️ Scheduler error: %s", e, exc_info=True)
         time.sleep(30)
 
-# ---------- Flask app ----------
+# ----------------------- Flask app -----------------------
 app = Flask(__name__)
 
 @app.route("/")
 def index():
     try:
-        jobs = "<br>".join([str(j) for j in schedule.get_jobs()]) or "No schedule"
+        jobs = "<br>".join([str(j) for j in schedule.get_jobs()]) or "No schedule set."
     except Exception:
-        jobs = "Could not list schedule"
+        jobs = "Could not list schedule."
     html = f"""
     <html><body style="font-family: sans-serif; text-align:center; padding-top:30px;">
-    <h2>🤖 AI Economic Report Service (v4.2)</h2>
-    <p><strong>Drive folder ID:</strong> {GOOGLE_DRIVE_FOLDER_ID}</p>
-    <p><strong>Scheduled (UTC):</strong></p>
-    <div style="background:#f3f3f3; padding:10px; display:inline-block;"><code>{jobs}</code></div>
-    <p style="margin-top:20px;"><a href="/report">Run report manually</a></p>
+      <h2>🤖 AI Economic Report Service (Drive Upload)</h2>
+      <p><strong>Drive folder ID:</strong> {GOOGLE_DRIVE_FOLDER_ID}</p>
+      <p><strong>Scheduled (UTC):</strong></p>
+      <div style="background:#f3f3f3; padding:10px; display:inline-block;"><code>{jobs}</code></div>
+      <p style="margin-top:20px;"><a href="/report">Run report manually</a></p>
     </body></html>
     """
     return html, 200
@@ -412,8 +346,8 @@ def health():
 def favicon():
     return Response(status=204)
 
-# ---------- Main ----------
+# ----------------------- Main -----------------------
 if __name__ == "__main__":
     threading.Thread(target=schedule_runner, daemon=True).start()
-    logger.info(f"🌐 Starting server on port {PORT} ...")
+    logger.info("🌐 Starting server on port %s ...", PORT)
     serve(app, host="0.0.0.0", port=PORT)
